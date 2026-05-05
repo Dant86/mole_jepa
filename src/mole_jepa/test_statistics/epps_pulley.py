@@ -1,4 +1,4 @@
-"""Epps-Pulley regularizers and factory function."""
+"""Epps-Pulley test statistics and factory function."""
 
 import abc
 from typing import Literal
@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 
-class EppsPulleyRegularizer(abc.ABC, nn.Module):
+class EppsPulley(abc.ABC, nn.Module):
     """Implements the Epps-Pulley univariate test for an arbitrary distribution.
 
     Computes the integrated squared distance between the empirical
@@ -70,8 +70,8 @@ class EppsPulleyRegularizer(abc.ABC, nn.Module):
         ...
 
 
-class EppsPulleyGaussian(EppsPulleyRegularizer):
-    """Epps-Pulley regularizer targeting the standard normal distribution.
+class EppsPulleyGaussian(EppsPulley):
+    """Epps-Pulley test targeting the standard normal distribution.
 
     The characteristic function of N(0, 1) is:
 
@@ -90,8 +90,8 @@ class EppsPulleyGaussian(EppsPulleyRegularizer):
         return torch.exp(-0.5 * t.pow(2))
 
 
-class EppsPulleyLaplace(EppsPulleyRegularizer):
-    """Epps-Pulley regularizer targeting the standard Laplace distribution.
+class EppsPulleyLaplace(EppsPulley):
+    """Epps-Pulley test targeting the standard Laplace distribution.
 
     The characteristic function of Laplace(0, 1) is:
 
@@ -114,8 +114,8 @@ def epps_pulley(
     distribution: Literal["gaussian", "laplace"],
     t_max: float = 3.0,
     n_integration_points: int = 17,
-) -> EppsPulleyRegularizer:
-    """Construct an Epps-Pulley regularizer for the given distribution.
+) -> EppsPulley:
+    """Construct an Epps-Pulley test statistic for the given distribution.
 
     Args:
         distribution: Target distribution. One of ``"gaussian"`` or ``"laplace"``.
@@ -123,7 +123,7 @@ def epps_pulley(
         n_integration_points: Number of quadrature points.
 
     Returns:
-        An initialised :class:`EppsPulleyRegularizer`.
+        An initialised :class:`EppsPulley`.
 
     Raises:
         ValueError: If `distribution` is not a supported value.
