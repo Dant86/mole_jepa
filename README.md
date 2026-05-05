@@ -1,18 +1,8 @@
 # MoLeJEPA
 
-```
-          ░░░░░░░░             
-        ░▓▓▓▓▓▓▓▓▓░           
-       ░▓▓▓▓▓▓▓▓▓▓▓░          
-      ░▓▓▓▓▓▓▓▓▓▓▓▓▓░         
-      ░▓▓●▓▓▓▓▓▓▓▓▓▓▶         
-      ░▓▓▓▓▓▓▓▓▓▓▓▓▓░         
-       ░▓▓▓▓▓▓▓▓▓▓▓░          
-     ░░░▓▓▓▓▓▓▓▓▓░░░          
-    ░▓▓░▓▓▓▓▓▓▓▓░▓▓░          
-    ░░░░▓▓▓░░░▓▓▓░░░          
-        ░░░   ░░░             
-```
+<div align="center">
+  <img src="assets/mole.svg" width="320" alt="pixel art mole">
+</div>
 
 A multimodal JEPA that predicts text embeddings from image embeddings,
 regularized with SIGReg to prevent representational collapse.
