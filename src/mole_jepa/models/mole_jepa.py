@@ -76,9 +76,9 @@ class MoLeJEPA(nn.Module):
         Returns:
             MoLeJEPAOutput containing total loss and its components.
         """
-        z_v = self.image_encoder(pixel_values)               # (B, d)
-        z_t = self.text_encoder(input_ids, attention_mask)   # (B, d)
-        z_hat_t = self.predictor(z_v)                        # (B, d)
+        z_v = self.image_encoder(pixel_values)  # (B, d)
+        z_t = self.text_encoder(input_ids, attention_mask)  # (B, d)
+        z_hat_t = self.predictor(z_v)  # (B, d)
 
         loss_mse = functional.mse_loss(z_hat_t, z_t)
         loss_reg = self.regularizer(z_v) + self.regularizer(z_t)

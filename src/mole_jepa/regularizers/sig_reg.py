@@ -48,9 +48,7 @@ class SIGReg[TestT: nn.Module](nn.Module):
         n, d = x.shape
 
         # Sample M random unit vectors on S^{d-1}: (M, d)
-        directions = torch.randn(
-            self.n_directions, d, device=x.device, dtype=x.dtype
-        )
+        directions = torch.randn(self.n_directions, d, device=x.device, dtype=x.dtype)
         directions = directions / directions.norm(dim=1, keepdim=True)
 
         # Project all embeddings onto each direction: (n, M)
@@ -58,8 +56,5 @@ class SIGReg[TestT: nn.Module](nn.Module):
 
         # Apply the test statistic to each direction's scalar projections and average.
         return torch.stack(
-            [
-                self.test_statistic(projections[:, m])
-                for m in range(self.n_directions)
-            ]
+            [self.test_statistic(projections[:, m]) for m in range(self.n_directions)]
         ).mean()
