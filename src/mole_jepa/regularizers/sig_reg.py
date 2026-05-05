@@ -3,8 +3,6 @@
 import torch
 from torch import nn
 
-from mole_jepa import test_statistics
-
 
 class SIGReg(nn.Module):
     """Sketched Isotropic Gaussian Regularization (SIGReg).
@@ -30,7 +28,7 @@ class SIGReg(nn.Module):
 
     def __init__(
         self,
-        test_statistic: test_statistics.EppsPulley,
+        test_statistic: nn.Module,
         n_directions: int = 128,
     ) -> None:
         super().__init__()
