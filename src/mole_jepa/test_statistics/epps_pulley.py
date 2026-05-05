@@ -37,25 +37,35 @@ class EppsPulley(abc.ABC, nn.Module):
         self.register_buffer("weights", weights)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute the Epps-Pulley statistic for a batch of samples.
+        """Compute the Epps-Pulley statistic for one or many sample sets.
+
+        Accepts a single set of samples `(n,)` or M parallel sets `(n, M)`.
+        The batched form is used by :class:`~mole_jepa.regularizers.SIGReg`
+        to evaluate all projection directions in one pass.
 
         Args:
-            x: 1-D tensor of shape `(n,)` containing i.i.d. samples.
+            x: Samples of shape `(n,)` or `(n, M)`.
 
         Returns:
-            Scalar loss value.
+            Scalar statistic for `(n,)` input, or `(M,)` tensor for `(n, M)`.
         """
-        phase = torch.outer(x, self.t)  # (n, T)
+        batched = x.dim() == 2
+        if not batched:
+            x = x.unsqueeze(1)  # (n, 1)
+
+        phase = x.unsqueeze(-1) * self.t  # (n, M, T)
 
         # Decompose the empirical CF into its real (cosine) and imaginary (sine) parts.
-        phi_hat_real = torch.mean(torch.cos(phase), dim=0)  # (T,)
-        phi_hat_imag = torch.mean(torch.sin(phase), dim=0)  # (T,)
+        phi_hat_real = torch.cos(phase).mean(dim=0)  # (M, T)
+        phi_hat_imag = torch.sin(phase).mean(dim=0)  # (M, T)
 
         # Target CF is real-valued for all supported distributions.
         phi = self.characteristic_fn(self.t)  # (T,)
 
-        diff_sq = (phi_hat_real - phi).pow(2) + phi_hat_imag.pow(2)
-        return (self.weights * diff_sq).sum()
+        diff_sq = (phi_hat_real - phi).pow(2) + phi_hat_imag.pow(2)  # (M, T)
+        result = (self.weights * diff_sq).sum(dim=-1)  # (M,)
+
+        return result if batched else result.squeeze()
 
     @abc.abstractmethod
     def characteristic_fn(self, t: torch.Tensor) -> torch.Tensor:

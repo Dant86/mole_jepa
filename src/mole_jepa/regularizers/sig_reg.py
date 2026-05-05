@@ -18,8 +18,10 @@ class SIGReg[TestT: nn.Module](nn.Module):
     is sampled on each forward pass.
 
     Args:
-        test_statistic: A univariate test statistic module whose ``forward``
-            accepts a 1-D tensor of shape `(n,)` and returns a scalar.
+        test_statistic: Univariate test statistic module. Must support batched
+            input of shape `(n, M)` and return `(M,)`. All
+            :class:`~mole_jepa.test_statistics.EppsPulley` subclasses satisfy
+            this contract.
         n_directions: Number of random projection directions M.
 
     Notes:
@@ -45,7 +47,7 @@ class SIGReg[TestT: nn.Module](nn.Module):
         Returns:
             Scalar regularization loss.
         """
-        n, d = x.shape
+        _, d = x.shape
 
         # Sample M random unit vectors on S^{d-1}: (M, d)
         directions = torch.randn(self.n_directions, d, device=x.device, dtype=x.dtype)
@@ -54,7 +56,5 @@ class SIGReg[TestT: nn.Module](nn.Module):
         # Project all embeddings onto each direction: (n, M)
         projections = x @ directions.T
 
-        # Apply the test statistic to each direction's scalar projections and average.
-        return torch.stack(
-            [self.test_statistic(projections[:, m]) for m in range(self.n_directions)]
-        ).mean()
+        # Evaluate all M directions in one batched call and average.
+        return self.test_statistic(projections).mean()
