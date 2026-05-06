@@ -23,11 +23,24 @@ dev = [
     "pre-commit>=4.2",
     "pyright>=1.1",
     "pytest>=8.0",
+    "pytest-cov>=6.0",
     "ruff>=0.11",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=mole_jepa --cov-report=xml --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "@abc.abstractmethod",
+]
 
 [tool.ruff]
 line-length = 88

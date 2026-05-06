@@ -4,7 +4,6 @@ import dataclasses
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from mole_jepa.models import encoders
 from mole_jepa.models import predictor as predictor_module
@@ -12,37 +11,32 @@ from mole_jepa.models import predictor as predictor_module
 
 @dataclasses.dataclass
 class MoLeJEPAOutput:
-    """Named outputs from a MoLeJEPA forward pass.
+    """Encoder and predictor outputs from a MoLeJEPA forward pass.
 
     Attributes:
-        loss: Total training loss: ``loss_mse + reg_weight * loss_reg``.
-        loss_mse: MSE between predicted and actual text embeddings.
-        loss_reg: SIGReg applied to both encoder outputs.
+        z_v: Image embeddings ``f(x)`` of shape ``(B, d)``.
+        z_hat_t: Predicted text embeddings ``g(f(x))`` of shape ``(B, d)``.
+        z_t: Text embeddings ``h(y)`` of shape ``(B, d)``.
     """
 
-    loss: torch.Tensor
-    loss_mse: torch.Tensor
-    loss_reg: torch.Tensor
+    z_v: torch.Tensor
+    z_hat_t: torch.Tensor
+    z_t: torch.Tensor
 
 
 class MoLeJEPA(nn.Module):
-    """MoLeJEPA: multimodal JEPA with SIGReg regularization.
+    """MoLeJEPA: multimodal JEPA encoder–predictor.
 
-    Encodes images with `f` and text with `h`, predicts text embeddings
-    from image embeddings via predictor `g`, and applies SIGReg to both
-    encoder outputs to prevent representational collapse. All components
-    are trained jointly.
-
-    The total loss is:
-
-        L = L_MSE(g(f(x)), h(y)) + reg_weight * (SIGReg(f(x)) + SIGReg(h(y)))
+    Encodes images with `f` and text with `h`, then predicts text embeddings
+    from image embeddings via predictor `g`. Loss computation is intentionally
+    decoupled; use a loss module such as
+    :class:`~mole_jepa.losses.JEPALoss` or
+    :class:`~mole_jepa.losses.InfoNCELoss` on the returned output.
 
     Args:
         image_encoder: Encoder `f` mapping images to `z_v ∈ ℝ^d`.
         text_encoder: Encoder `h` mapping text to `z_t ∈ ℝ^d`.
         predictor: Module `g` mapping `z_v` to `ẑ_t`.
-        regularizer: SIGReg instance applied to both `z_v` and `z_t`.
-        reg_weight: Weighting factor λ scaling the regularization loss.
     """
 
     def __init__(
@@ -50,15 +44,11 @@ class MoLeJEPA(nn.Module):
         image_encoder: encoders.ImageEncoder,
         text_encoder: encoders.TextEncoder,
         predictor: predictor_module.Predictor,
-        regularizer: nn.Module,
-        reg_weight: float = 1.0,
     ) -> None:
         super().__init__()
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
         self.predictor = predictor
-        self.regularizer = regularizer
-        self.reg_weight = reg_weight
 
     def forward(
         self,
@@ -66,7 +56,7 @@ class MoLeJEPA(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> MoLeJEPAOutput:
-        """Run a forward pass and compute training losses.
+        """Encode inputs and predict text embeddings.
 
         Args:
             pixel_values: Float tensor of shape `(B, C, H, W)`.
@@ -74,17 +64,10 @@ class MoLeJEPA(nn.Module):
             attention_mask: Padding mask of shape `(B, T)`.
 
         Returns:
-            MoLeJEPAOutput containing total loss and its components.
+            MoLeJEPAOutput containing ``z_v``, ``z_hat_t``, and ``z_t``.
         """
         z_v = self.image_encoder(pixel_values)  # (B, d)
         z_t = self.text_encoder(input_ids, attention_mask)  # (B, d)
         z_hat_t = self.predictor(z_v)  # (B, d)
 
-        loss_mse = functional.mse_loss(z_hat_t, z_t)
-        loss_reg = self.regularizer(z_v) + self.regularizer(z_t)
-
-        return MoLeJEPAOutput(
-            loss=loss_mse + self.reg_weight * loss_reg,
-            loss_mse=loss_mse,
-            loss_reg=loss_reg,
-        )
+        return MoLeJEPAOutput(z_v=z_v, z_hat_t=z_hat_t, z_t=z_t)
