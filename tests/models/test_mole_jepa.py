@@ -30,16 +30,12 @@ def model(mock_pretrained: unittest.mock.MagicMock) -> mole_jepa_module.MoLeJEPA
     return mole_jepa_module.MoLeJEPA(
         image_encoder=encoders.ImageEncoder(embed_dim=_EMBED_DIM),
         text_encoder=encoders.TextEncoder(embed_dim=_EMBED_DIM),
-        predictor=predictor_module.Predictor(
-            embed_dim=_EMBED_DIM, hidden_dim=64
-        ),
+        predictor=predictor_module.Predictor(embed_dim=_EMBED_DIM, hidden_dim=64),
     )
 
 
 def _set_hidden(mock_pretrained: unittest.mock.MagicMock) -> None:
-    mock_pretrained.return_value.last_hidden_state = torch.randn(
-        _B, _T, _HIDDEN_SIZE
-    )
+    mock_pretrained.return_value.last_hidden_state = torch.randn(_B, _T, _HIDDEN_SIZE)
 
 
 class TestMoLeJEPA:

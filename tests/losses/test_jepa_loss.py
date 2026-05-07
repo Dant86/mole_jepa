@@ -60,9 +60,7 @@ class TestJEPALoss:
         z_v = torch.randn(_N, _D, requires_grad=True)
         z_hat_t = torch.randn(_N, _D, requires_grad=True)
         z_t = torch.randn(_N, _D, requires_grad=True)
-        output = mole_jepa_module.MoLeJEPAOutput(
-            z_v=z_v, z_hat_t=z_hat_t, z_t=z_t
-        )
+        output = mole_jepa_module.MoLeJEPAOutput(z_v=z_v, z_hat_t=z_hat_t, z_t=z_t)
         loss_fn(output).loss.backward()
         assert z_v.grad is not None
         assert z_hat_t.grad is not None

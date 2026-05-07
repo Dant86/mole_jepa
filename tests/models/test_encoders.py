@@ -48,9 +48,7 @@ class TestMeanPool:
 
 
 class TestImageEncoder:
-    def test_output_shape(
-        self, mock_pretrained: unittest.mock.MagicMock
-    ) -> None:
+    def test_output_shape(self, mock_pretrained: unittest.mock.MagicMock) -> None:
         mock_pretrained.return_value.last_hidden_state = torch.randn(
             _B, 197, _HIDDEN_SIZE
         )
@@ -77,9 +75,7 @@ class TestImageEncoder:
         expected = torch.full((_B, _EMBED_DIM), float(_HIDDEN_SIZE))
         assert torch.allclose(z, expected)
 
-    def test_gradient_flows(
-        self, mock_pretrained: unittest.mock.MagicMock
-    ) -> None:
+    def test_gradient_flows(self, mock_pretrained: unittest.mock.MagicMock) -> None:
         mock_pretrained.return_value.last_hidden_state = torch.randn(
             _B, 197, _HIDDEN_SIZE
         )
@@ -90,9 +86,7 @@ class TestImageEncoder:
 
 
 class TestTextEncoder:
-    def test_output_shape(
-        self, mock_pretrained: unittest.mock.MagicMock
-    ) -> None:
+    def test_output_shape(self, mock_pretrained: unittest.mock.MagicMock) -> None:
         mock_pretrained.return_value.last_hidden_state = torch.randn(
             _B, _T, _HIDDEN_SIZE
         )
@@ -109,7 +103,7 @@ class TestTextEncoder:
         # Set padded positions to a large value; if they were included in the
         # mean the output would differ from the masked-only result.
         last_hidden = torch.zeros(_B, _T, _HIDDEN_SIZE)
-        last_hidden[:, 0, :] = 1.0   # only first token is "real"
+        last_hidden[:, 0, :] = 1.0  # only first token is "real"
         last_hidden[:, 1:, :] = 1e6  # padding — should be zeroed out
         mock_pretrained.return_value.last_hidden_state = last_hidden
 
@@ -123,9 +117,7 @@ class TestTextEncoder:
         z_all = encoder(torch.randint(0, 100, (_B, _T)), mask_all)
         assert not torch.allclose(z_masked, z_all)
 
-    def test_gradient_flows(
-        self, mock_pretrained: unittest.mock.MagicMock
-    ) -> None:
+    def test_gradient_flows(self, mock_pretrained: unittest.mock.MagicMock) -> None:
         mock_pretrained.return_value.last_hidden_state = torch.randn(
             _B, _T, _HIDDEN_SIZE
         )

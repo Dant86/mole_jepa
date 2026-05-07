@@ -41,9 +41,7 @@ class TestInfoNCELoss:
         z2 = torch.randn(_B, _D)
         assert loss_fn(z1, z2).item() == pytest.approx(loss_fn(z2, z1).item())
 
-    def test_aligned_pairs_lower_than_random(
-        self, loss_fn: losses.InfoNCELoss
-    ) -> None:
+    def test_aligned_pairs_lower_than_random(self, loss_fn: losses.InfoNCELoss) -> None:
         # When z1 == z2 (perfectly aligned), each positive pair has maximum
         # similarity; loss should be lower than for random, uncorrelated pairs.
         torch.manual_seed(_SEED)
