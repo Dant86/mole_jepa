@@ -13,12 +13,18 @@ regularized with SIGReg to prevent representational collapse.
 
 Image encoder `f` (ViT) and text encoder `h` (LM) both project to a shared
 embedding space `ℝᵈ`. A lightweight MLP predictor `g` is trained to predict
-`h(y)` from `f(x)` for paired image-text inputs `(x, y)`. SIGReg is applied
-to both encoder outputs to enforce isotropic Gaussian structure:
+`h(y)` from `f(x)` for paired image-text inputs `(x, y)`.
+
+The model and loss are intentionally decoupled. `MoLeJEPA.forward` returns the
+raw embeddings `(f(x), g(f(x)), h(y))`; a separate loss module is composed on
+top. The default training objective combines MSE prediction loss with SIGReg
+regularization on both encoder outputs to prevent representational collapse:
 
 ```
 L = MSE(g(f(x)), h(y))  +  λ · (SIGReg(f(x)) + SIGReg(h(y)))
 ```
+
+An InfoNCE contrastive loss is also provided as an alternative or complement.
 
 ## Project Structure
 
@@ -28,6 +34,9 @@ src/mole_jepa/
 │   ├── encoders.py       # ImageEncoder (ViT), TextEncoder (LM)
 │   ├── predictor.py      # MLP predictor g
 │   └── mole_jepa.py      # Top-level model and MoLeJEPAOutput
+├── losses/
+│   ├── jepa_loss.py      # JEPALoss (MSE + SIGReg)
+│   └── info_nce.py       # InfoNCELoss
 ├── regularizers/
 │   └── sig_reg.py        # SIGReg
 └── test_statistics/
@@ -52,6 +61,9 @@ uv run pre-commit install
 uv run pytest
 ```
 
+Coverage is measured automatically on every run and written to `coverage.xml`.
+A terminal summary is printed at the end of the test output.
+
 ### Code Style
 
 This project enforces consistent style via **ruff** (lint + format) and
@@ -66,10 +78,14 @@ each group separated by a blank line. `ruff` (isort rules) enforces the
 ordering automatically.
 
 Import **modules**, not names from modules. The only exception is the
-`typing` module, whose members may be imported directly.
+`typing` module, whose members may be imported directly — but only when
+`typing` is the canonical home. Names that have migrated to `collections.abc`
+(e.g. `Iterator`, `Generator`, `Callable`) must be imported from there as a
+module, not from `typing`.
 
 ```python
 # stdlib
+import collections.abc
 import dataclasses
 from typing import Literal
 
