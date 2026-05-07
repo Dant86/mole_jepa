@@ -1,6 +1,7 @@
 """Unit tests for MoLeJEPA."""
 
 import unittest.mock
+from typing import Iterator
 
 import pytest
 import torch
@@ -16,7 +17,7 @@ _T = 8
 
 
 @pytest.fixture
-def mock_pretrained() -> unittest.mock.MagicMock:
+def mock_pretrained() -> Iterator[unittest.mock.MagicMock]:
     mock_model = unittest.mock.MagicMock()
     mock_model.config.hidden_size = _HIDDEN_SIZE
     with unittest.mock.patch(
