@@ -1,43 +1,17 @@
 """Driver file for training."""
 
 import argparse
-import dataclasses
-import hashlib
 import os
 import pathlib
 import re
 import signal
 import sys
-from typing import Any, Literal
+from typing import Any
 
 import torch
-from torch import nn
 
-from mole_jepa import losses, models, regularizers, test_statistics
-
-
-@dataclasses.dataclass
-class ModelConfig:
-    """Model configuration.
-
-    The :class:`ModelConfig` class contains the minimal set of attributes
-    required to represent a MoLeJEPA.
-    """
-
-    contrastive: bool = False
-    sigreg_dist: Literal["gaussian", "laplace"] = "gaussian"
-
-    def serialize(self) -> str:
-        """Serialize a :class:`ModelConfig` instance to a hash string.
-
-        Returns:
-            A unique string identifier for this config.
-        """
-        s_repr = sum(
-            [f"{k}={v}" for k, v in dataclasses.asdict(self)], start=""
-        ).encode("utf-8")
-
-        return hashlib.sha256(s_repr).hexdigest()
+from mole_jepa import config as config_module
+from mole_jepa import models
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,83 +20,119 @@ def parse_args() -> argparse.Namespace:
     Returns:
         A :class:`Namespace` object.
     """
+    cfg = config_module.ModelConfig()
     parser = argparse.ArgumentParser()
 
+    # ── training ──────────────────────────────────────────────────────────────
     parser.add_argument(
         "--resume",
-        acton="store_true",
-        help="If specified, load the latest model checkpoint and resume training.",
+        action="store_true",
+        help="Load the latest checkpoint and resume training.",
     )
-
     parser.add_argument(
         "--checkpoint-dir",
         help="Directory from which to read/write model checkpoints.",
     )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        help="Number of training epochs.",
+    )
 
+    # ── shared ────────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--embed-dim",
+        type=int,
+        default=cfg.embed_dim,
+        help="Shared embedding dimension for both encoders and the predictor.",
+    )
+
+    # ── encoders ──────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--image-encoder-model-name",
+        default=cfg.image_encoder_model_name,
+        help="HuggingFace model identifier for the image encoder (ViT).",
+    )
+    parser.add_argument(
+        "--text-encoder-model-name",
+        default=cfg.text_encoder_model_name,
+        help="HuggingFace model identifier for the text encoder (LM).",
+    )
+
+    # ── predictor ─────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--predictor-hidden-dim",
+        type=int,
+        default=cfg.predictor_hidden_dim,
+        help="Hidden width of the MLP predictor.",
+    )
+    parser.add_argument(
+        "--predictor-n-layers",
+        type=int,
+        default=cfg.predictor_n_layers,
+        help="Total number of linear layers in the MLP predictor.",
+    )
+
+    # ── loss ──────────────────────────────────────────────────────────────────
     parser.add_argument(
         "--use-contrastive-loss",
-        help="If specified, use InfoNCE loss. Defaults to SIGReg.",
         action="store_true",
+        help="Use InfoNCE loss instead of JEPALoss with SIGReg.",
     )
-
     parser.add_argument(
         "--sigreg-dist",
-        help="Distribution to regularize with respect to.",
-        options=["gaussian", "laplace"],
+        choices=["gaussian", "laplace"],
+        default=cfg.sigreg_dist,
+        help="Target distribution for the SIGReg Epps-Pulley statistic.",
     )
-
-    parser.add_argument("--num_epochs", type=int, help="Number of train epochs.")
+    parser.add_argument(
+        "--sigreg-n-directions",
+        type=int,
+        default=cfg.sigreg_n_directions,
+        help="Number of random projection directions used by SIGReg.",
+    )
+    parser.add_argument(
+        "--jepa-reg-weight",
+        type=float,
+        default=cfg.jepa_reg_weight,
+        help="Weighting factor λ for the SIGReg term in JEPALoss.",
+    )
+    parser.add_argument(
+        "--info-nce-temperature",
+        type=float,
+        default=cfg.info_nce_temperature,
+        help="Softmax temperature for InfoNCELoss.",
+    )
 
     return parser.parse_args()
 
 
-def construct_model_config(args: argparse.Namespace) -> ModelConfig:
-    """Construct a :class:`ModelConfig` class.
+def construct_model_config(args: argparse.Namespace) -> config_module.ModelConfig:
+    """Construct a :class:`~mole_jepa.config.ModelConfig` from CLI arguments.
 
     Args:
-        args: :class:`Namespace` object from CLI args.
+        args: Parsed CLI arguments.
 
     Returns:
-        A :class:`ModelConfig` instance.
+        A :class:`~mole_jepa.config.ModelConfig` instance.
     """
-    return ModelConfig(
+    return config_module.ModelConfig(
+        embed_dim=args.embed_dim,
+        image_encoder_model_name=args.image_encoder_model_name,
+        text_encoder_model_name=args.text_encoder_model_name,
+        predictor_hidden_dim=args.predictor_hidden_dim,
+        predictor_n_layers=args.predictor_n_layers,
         contrastive=args.use_contrastive_loss,
         sigreg_dist=args.sigreg_dist,
+        sigreg_n_directions=args.sigreg_n_directions,
+        jepa_reg_weight=args.jepa_reg_weight,
+        info_nce_temperature=args.info_nce_temperature,
     )
 
 
-def construct_model_and_loss(
-    config: ModelConfig,
-) -> tuple[models.MoLeJEPA, nn.Module]:
-    """Recover a :class:`MoleJEPA` instance and loss function.
-
-    Args:
-        config: A :class:`ModelConfig` instance.
-
-    Returns:
-        A :class:`MoleJepa` instance and a loss :class:`Module`.
-    """
-    if config.contrastive:
-        loss = losses.InfoNCELoss()
-    else:
-        loss = losses.JEPALoss(
-            regularizers.SIGReg(
-                test_statistics.epps_pulley(
-                    config.sigreg_dist,
-                ),
-            )
-        )
-
-    model = models.MoLeJEPA(
-        image_encoder=models.ImageEncoder(),
-        text_encoder=models.TextEncoder(),
-        predictor=models.Predictor(256, 512),
-    )
-
-    return model, loss
-
-
-def model_location(checkpoint_dir: str, config: ModelConfig) -> pathlib.Path:
+def model_location(
+    checkpoint_dir: str, config: config_module.ModelConfig
+) -> pathlib.Path:
     """Construct the model checkpoint location.
 
     Args:
@@ -182,7 +192,7 @@ def main() -> None:
     config = construct_model_config(args)
     loc = model_location(args.checkpoint_dir, config)
 
-    model, loss = construct_model_and_loss(config)
+    model, loss = config_module.build(config)
     start_epoch = 0
 
     if args.resume:
