@@ -15,6 +15,7 @@ dependencies = [
     "torch",
     "plotly",
     "datasets",
+    "Pillow",
     "transformers",
 ]
 

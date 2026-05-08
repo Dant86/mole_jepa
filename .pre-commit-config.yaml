@@ -1,13 +1,20 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.9
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-
   - repo: local
     hooks:
+      - id: ruff
+        name: ruff
+        language: system
+        entry: bash -c 'uv run ruff check --fix "$@"; git add "$@"; uv run ruff check "$@"' _
+        types: [python]
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff-format
+        language: system
+        entry: bash -c 'uv run ruff format "$@" && git add "$@"' _
+        types: [python]
+        pass_filenames: true
+
       - id: pyright
         name: pyright
         entry: uv run pyright

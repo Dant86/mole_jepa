@@ -57,6 +57,31 @@ class ModelConfig:
         return hashlib.sha256(payload).hexdigest()
 
 
+@dataclasses.dataclass
+class DataConfig:
+    """Configuration for data loading and preprocessing.
+
+    The processor and tokenizer model names should match those in
+    :class:`ModelConfig` to ensure consistent preprocessing.
+
+    Attributes:
+        image_processor_model_name: HuggingFace identifier for the image
+            processor. Should match ``ModelConfig.image_encoder_model_name``.
+        tokenizer_model_name: HuggingFace identifier for the tokenizer.
+            Should match ``ModelConfig.text_encoder_model_name``.
+        max_seq_length: Maximum token sequence length; longer captions are
+            truncated.
+        batch_size: DataLoader batch size.
+        num_workers: Number of DataLoader worker processes.
+    """
+
+    image_processor_model_name: str = "google/vit-base-patch16-224"
+    tokenizer_model_name: str = "bert-base-uncased"
+    max_seq_length: int = 64
+    batch_size: int = 256
+    num_workers: int = 4
+
+
 def build(config: ModelConfig) -> tuple[models.MoLeJEPA, nn.Module]:
     """Instantiate a :class:`~mole_jepa.models.MoLeJEPA` and its loss module.
 
