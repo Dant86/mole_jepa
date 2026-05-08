@@ -1,9 +1,10 @@
 """Driver file for training."""
 
 import argparse
+import datetime
+import json
 import os
 import pathlib
-import re
 import signal
 import sys
 from typing import Any
@@ -15,6 +16,10 @@ import torch.utils.data
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
 from mole_jepa import losses, models
+
+_CHECKPOINT_FILE = "checkpoint.pt"
+_FINAL_MODEL_FILE = "model.pt"
+_STATS_FILE = "stats.jsonl"
 
 
 def _get_device() -> torch.device:
@@ -281,54 +286,105 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     model_loc: pathlib.Path,
-    val_loss: float | None = None,
 ) -> None:
-    """Save model and optimiser state to a checkpoint file.
+    """Save model and optimiser state to a single checkpoint file.
+
+    Always writes to ``checkpoint.pt`` inside ``model_loc``, overwriting any
+    previous checkpoint. The completed epoch is stored inside the file so it
+    can be recovered without relying on the filename.
 
     Args:
         model: The model whose weights to persist.
         optimizer: The optimiser whose state to persist.
         epoch: Most recently completed epoch (0-indexed).
         model_loc: Directory in which to write the checkpoint.
-        val_loss: Average validation loss for this epoch, if evaluated.
     """
     os.makedirs(model_loc, exist_ok=True)
     torch.save(
         {
+            "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "val_loss": val_loss,
         },
-        model_loc / f"epoch_{epoch}.pt",
+        model_loc / _CHECKPOINT_FILE,
     )
 
 
 def load_checkpoint(
     model_loc: pathlib.Path,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, int]:
-    """Load the most recent checkpoint from ``model_loc``.
+    """Load the checkpoint from ``model_loc``.
 
     Args:
-        model_loc: Directory containing ``epoch_N.pt`` checkpoint files.
+        model_loc: Directory containing ``checkpoint.pt``.
 
     Returns:
         A ``(model_state_dict, optimizer_state_dict, epoch)`` triple.
         ``optimizer_state_dict`` is ``None`` if the checkpoint predates
         optimizer state persistence.
     """
-    pattern = re.compile(r"^epoch_(\d+)\.pt$")
-    epoch = max(
-        int(m.group(1)) for f in os.listdir(model_loc) if (m := pattern.match(f))
-    )
     checkpoint = torch.load(
-        model_loc / f"epoch_{epoch}.pt",
+        model_loc / _CHECKPOINT_FILE,
         weights_only=True,
     )
     return (
         checkpoint["model_state_dict"],
         checkpoint.get("optimizer_state_dict"),
-        epoch,
+        checkpoint["epoch"],
     )
+
+
+def save_final_model(
+    model: models.MoLeJEPA,
+    epoch: int,
+    model_loc: pathlib.Path,
+) -> None:
+    """Save the final model weights after a completed training run.
+
+    Writes only the model state dict (no optimiser state) to ``model.pt``
+    inside ``model_loc``. The optimiser is not needed after training ends.
+
+    Args:
+        model: The fully trained model.
+        epoch: Last completed epoch (0-indexed).
+        model_loc: Directory in which to write the file.
+    """
+    os.makedirs(model_loc, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+        },
+        model_loc / _FINAL_MODEL_FILE,
+    )
+
+
+def log_stats(
+    model_loc: pathlib.Path,
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+) -> None:
+    """Append one stats record to ``stats.jsonl`` inside ``model_loc``.
+
+    Each line is a self-contained JSON object, making the file easy to tail,
+    parse incrementally, or load with ``pandas.read_json(..., lines=True)``.
+
+    Args:
+        model_loc: Directory in which to write the stats file.
+        epoch: Completed epoch number (0-indexed).
+        train_loss: Average training loss for this epoch.
+        val_loss: Average validation loss for this epoch.
+    """
+    record = {
+        "epoch": epoch,
+        "train_loss": round(train_loss, 6),
+        "val_loss": round(val_loss, 6),
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    os.makedirs(model_loc, exist_ok=True)
+    with open(model_loc / _STATS_FILE, "a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def _compute_loss(
@@ -501,6 +557,19 @@ def main() -> None:
             optimizer.load_state_dict(opt_state)
         start_epoch += 1  # resume from the next epoch
 
+    # ── preemption handler ────────────────────────────────────────────────────
+    # SIGUSR1 is sent by SLURM five minutes before the wall-time limit.
+    # Save a checkpoint so the job can be requeued with --resume.
+    current_epoch = start_epoch
+
+    def _checkpoint_and_exit(*_: object) -> None:
+        print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch} and exiting.")
+        save_checkpoint(model, optimizer, current_epoch, loc)
+        sys.exit(0)
+
+    signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
+
+    # ── data ──────────────────────────────────────────────────────────────────
     loader = build_loader(
         args.hf_dataset_name, args.hf_dataset_split, data_config, device
     )
@@ -511,8 +580,11 @@ def main() -> None:
         device,
     )
 
+    # ── training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.num_epochs):
-        train_epoch(
+        current_epoch = epoch
+
+        train_loss = train_epoch(
             model,
             loss_fn,
             loader,
@@ -524,19 +596,15 @@ def main() -> None:
 
         if (epoch + 1) % 5 == 0:
             val_loss = eval_epoch(model, loss_fn, val_loader, device, epoch)
-            save_checkpoint(model, optimizer, epoch, loc, val_loss=val_loss)
+            log_stats(loc, epoch, train_loss, val_loss)
 
-    # Always save the final epoch, evaluating on val if not already done.
+    # Training completed successfully.
+    # Save the final model weights, then remove the partial checkpoint — it was
+    # only needed for resumption and is no longer useful.
     final_epoch = args.num_epochs - 1
-    if args.num_epochs % 5 != 0:
-        val_loss = eval_epoch(model, loss_fn, val_loader, device, final_epoch)
-        save_checkpoint(model, optimizer, final_epoch, loc, val_loss=val_loss)
-    else:
-        # Already saved by the loop above.
-        pass
+    save_final_model(model, final_epoch, loc)
+    (loc / _CHECKPOINT_FILE).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGUSR1, lambda *_: sys.exit(99))
-
     main()

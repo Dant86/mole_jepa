@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Submit a MoLeJEPA training job to the DSI cluster.
+#
+# Usage:
+#   sbatch scripts/train.sh
+#
+# Override any #SBATCH default at submission time, e.g.:
+#   sbatch --qos=protected --time=48:00:00 scripts/train.sh
+
+# ── job metadata ──────────────────────────────────────────────────────────────
+#SBATCH --job-name=mole_jepa_train
+#SBATCH --partition=general
+#SBATCH --qos=general
+#SBATCH --gres=gpu:1
+#SBATCH --time=12:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+
+# ── preemption / checkpointing ────────────────────────────────────────────────
+# Send SIGUSR1 five minutes before the wall-time limit so the train script can
+# save a checkpoint and exit cleanly (the train script installs this handler).
+#SBATCH --signal=B:USR1@300
+#SBATCH --requeue
+
+# ── environment ───────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# Create the log directory if it doesn't exist yet (SLURM won't do it for us).
+mkdir -p logs
+
+# Resolve the repo root regardless of where sbatch is invoked from.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# ── train ─────────────────────────────────────────────────────────────────────
+uv run python apps/train/train_main.py \
+    --checkpoint-dir      checkpoints \
+    --num-epochs          50 \
+    --lr                  1e-4 \
+    --weight-decay        1e-4 \
+    --grad-clip           1.0 \
+    --batch-size          256 \
+    --num-workers         4 \
+    --max-seq-length      64 \
+    --hf-dataset-name     conceptual_captions \
+    --hf-dataset-split    train \
+    --val-hf-dataset-split validation \
+    --embed-dim           256 \
+    --predictor-hidden-dim 512 \
+    --predictor-n-layers  2 \
+    --sigreg-n-directions 128 \
+    --jepa-reg-weight     1.0
