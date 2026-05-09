@@ -63,6 +63,7 @@ def _fetch(args: tuple[int, str, str]) -> tuple[int, str | None, bytes | None]:
 
 def _write_shard(
     output_dir: Path,
+    split: str,
     shard_idx: int,
     items: list[tuple[int, str, bytes]],
 ) -> Path:
@@ -70,13 +71,14 @@ def _write_shard(
 
     Args:
         output_dir: Directory in which to write the shard.
+        split: Dataset split name, used in the shard filename.
         shard_idx: Zero-based shard number, used to name the file.
         items: List of ``(index, caption, jpeg_bytes)`` tuples to pack.
 
     Returns:
         Path to the written shard file.
     """
-    path = output_dir / f"cc3m-train-{shard_idx:05d}.tar"
+    path = output_dir / f"cc3m-{split}-{shard_idx:05d}.tar"
     with tarfile.open(path, "w") as tf:
         for idx, caption, jpg_bytes in items:
             key = f"{idx:08d}"
@@ -177,14 +179,14 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
                     )
                     pending = []  # discard so the post-loop write doesn't fire
                     break
-                path = _write_shard(output_dir, shard_idx, pending)
+                path = _write_shard(output_dir, split, shard_idx, pending)
                 print(f"  shard {shard_idx:05d} → {path}  (ok={ok} skip={skip})")
                 pending = []
                 shard_idx += 1
                 _save_progress(output_dir, split, urls_consumed, ok, skip, shard_idx)
 
     if pending:
-        path = _write_shard(output_dir, shard_idx, pending)
+        path = _write_shard(output_dir, split, shard_idx, pending)
         print(f"  shard {shard_idx:05d} → {path}  (ok={ok} skip={skip})")
         shard_idx += 1
 
