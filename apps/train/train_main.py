@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     # ── data ──────────────────────────────────────────────────────────────────
     parser.add_argument(
         "--hf-dataset-name",
-        default="conceptual_captions",
+        default="pixparse/cc3m-wds",
         help="HuggingFace dataset identifier for the training set.",
     )
     parser.add_argument(
@@ -120,6 +120,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=dcfg.max_seq_length,
         help="Maximum token sequence length; longer captions are truncated.",
+    )
+    parser.add_argument(
+        "--image-field",
+        default=dcfg.image_field,
+        help="Dataset field name containing the image (default: 'jpg').",
+    )
+    parser.add_argument(
+        "--caption-field",
+        default=dcfg.caption_field,
+        help="Dataset field name containing the caption (default: 'txt').",
     )
 
     # ── shared model ──────────────────────────────────────────────────────────
@@ -235,6 +245,8 @@ def construct_data_config(
         max_seq_length=args.max_seq_length,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        image_field=args.image_field,
+        caption_field=args.caption_field,
     )
 
 

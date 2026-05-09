@@ -73,6 +73,10 @@ class DataConfig:
             truncated.
         batch_size: DataLoader batch size.
         num_workers: Number of DataLoader worker processes.
+        image_field: Key used to access the image in each dataset example.
+            Defaults to ``"jpg"`` to match ``pixparse/cc3m-wds``.
+        caption_field: Key used to access the caption string in each dataset
+            example. Defaults to ``"txt"`` to match ``pixparse/cc3m-wds``.
     """
 
     image_processor_model_name: str = "google/vit-base-patch16-224"
@@ -80,6 +84,8 @@ class DataConfig:
     max_seq_length: int = 64
     batch_size: int = 256
     num_workers: int = 4
+    image_field: str = "jpg"
+    caption_field: str = "txt"
 
 
 def build(config: ModelConfig) -> tuple[models.MoLeJEPA, nn.Module]:

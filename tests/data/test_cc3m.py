@@ -20,7 +20,8 @@ def _make_config() -> config_module.DataConfig:
 
 
 def _make_example(caption: str = "a photo") -> dict:
-    return {"image": unittest.mock.MagicMock(), "caption": caption}
+    # Field names match the DataConfig defaults (pixparse/cc3m-wds layout).
+    return {"jpg": unittest.mock.MagicMock(), "txt": caption}
 
 
 def _make_transform_mocks(
