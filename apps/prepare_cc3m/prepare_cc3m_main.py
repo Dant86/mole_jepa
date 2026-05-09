@@ -175,6 +175,7 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
                         f"  storage budget ({_STORAGE_BUDGET_GB:.0f} GB) reached "
                         f"after {ok:,} images — stopping."
                     )
+                    pending = []  # discard so the post-loop write doesn't fire
                     break
                 path = _write_shard(output_dir, shard_idx, pending)
                 print(f"  shard {shard_idx:05d} → {path}  (ok={ok} skip={skip})")
