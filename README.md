@@ -126,3 +126,45 @@ uv run ruff check .           # lint
 uv run ruff format --check .  # format check (drop --check to auto-fix)
 uv run pyright                # type check
 ```
+
+## Training on the DSI Cluster
+
+### 1. Environment setup
+
+All filesystem paths and secrets live in a gitignored `.env` file. Copy the
+sample and fill in your values before running any script:
+
+```bash
+cp .env.sample .env
+# edit .env — set HF_HOME, HF_TOKEN, CC3M_LOCAL_DIR, CHECKPOINT_DIR, LOG_DIR
+```
+
+### 2. Prepare the dataset (one-time)
+
+Downloads CC3M images, resizes them to 256×256, and packs them into
+WebDataset tar shards on scratch. Skips dead URLs automatically and resumes
+from prior progress if the job is preempted.
+
+```bash
+sbatch scripts/prepare_cc3m.sh
+```
+
+Expected runtime: 8–12 hours with 64 workers. Monitor progress in
+`$LOG_DIR/prepare_cc3m_<job_id>.out` — a line is printed per completed shard
+(5,000 images each). The script stops automatically when `$CC3M_LOCAL_DIR`
+reaches the storage budget configured in `prepare_cc3m_main.py`.
+
+### 3. Train
+
+```bash
+sbatch scripts/train.sh
+```
+
+The script auto-detects an existing checkpoint in `$CHECKPOINT_DIR` and passes
+`--resume` if one is found. On preemption, SLURM sends `SIGUSR1` five minutes
+before the wall-time limit; the train script catches it, saves a checkpoint,
+and exits so the job can be requeued.
+
+Logs are written to `$LOG_DIR/train_<job_id>.out` and `.err`.
+Training stats (loss, batch counts) are appended to `stats.jsonl` inside the
+checkpoint directory every 5 epochs.

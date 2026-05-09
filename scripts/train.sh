@@ -2,68 +2,61 @@
 # Submit a MoLeJEPA training job to the DSI cluster.
 #
 # Usage:
-#   cp scripts/train.sh.sample scripts/train.sh   # customise, then:
 #   sbatch scripts/train.sh
 #
 # Override any #SBATCH default at submission time, e.g.:
 #   sbatch --qos=protected --time=48:00:00 scripts/train.sh
 
-# ── job metadata ──────────────────────────────────────────────────────────────
+# ── SLURM directives ──────────────────────────────────────────────────────────
 #SBATCH --job-name=mole_jepa_train
 #SBATCH --partition=general
 #SBATCH --qos=general
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-
-# ── preemption / checkpointing ────────────────────────────────────────────────
-# Send SIGUSR1 five minutes before the wall-time limit so the train script can
-# save a checkpoint and exit cleanly (the train script installs this handler).
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
+# Log paths are set after sourcing .env — SLURM directives can't read env files,
+# so we redirect manually below.
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 # ── environment ───────────────────────────────────────────────────────────────
 set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
+export PYTHONUNBUFFERED=1
 
-# Install uv if not already present.
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 
-# Point HuggingFace cache at a persistent scratch directory so dataset shards
-# are only downloaded once and reused across jobs. Set this to your scratch path.
-export HF_HOME="/scratch/vpathak/hf_cache"
-export PYTHONUNBUFFERED=1  # flush stdout immediately so logs appear in real time
-
 # SLURM copies the script to a spool directory; use SLURM_SUBMIT_DIR so that
-# relative paths (checkpoints/, logs/, apps/) resolve correctly.
+# relative paths resolve correctly.
 cd "$SLURM_SUBMIT_DIR"
 
-# Create the log directory if it doesn't exist yet (SLURM won't do it for us).
-mkdir -p logs
+# Load all paths and secrets from .env.
+if [[ ! -f .env ]]; then
+    echo "ERROR: .env not found in ${SLURM_SUBMIT_DIR}. Copy .env.sample and fill in your values." >&2
+    exit 1
+fi
+source .env
 
-# Sync the virtualenv in case dependencies changed since the last run.
+# Redirect logs now that LOG_DIR is known.
+mkdir -p "${LOG_DIR}"
+exec > "${LOG_DIR}/train_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/train_${SLURM_JOB_ID}.err"
+
+mkdir -p "${CHECKPOINT_DIR}"
 uv sync
 
 # ── resume detection ──────────────────────────────────────────────────────────
-# The checkpoint lives under a config-hash subdirectory of --checkpoint-dir.
 RESUME_FLAG=""
-if compgen -G "checkpoints/*/checkpoint.pt" > /dev/null 2>&1; then
+if compgen -G "${CHECKPOINT_DIR}/*/checkpoint.pt" > /dev/null 2>&1; then
     RESUME_FLAG="--resume"
 fi
 
 # ── train ─────────────────────────────────────────────────────────────────────
-# If you have pre-downloaded shards via scripts/download_data.sh, point
-# --hf-dataset-name at the local directory for fast disk-speed loading.
-# Otherwise use the HuggingFace identifier (slow — streams over the network).
-#
-#   Local  : --hf-dataset-name "${HF_HOME}/cc3m-wds"
-#   Remote : --hf-dataset-name pixparse/cc3m-wds
 uv run python apps/train/train_main.py \
-    --checkpoint-dir       checkpoints \
+    --checkpoint-dir       "${CHECKPOINT_DIR}" \
     --num-epochs           100 \
     --lr                   1e-4 \
     --weight-decay         1e-4 \
@@ -71,9 +64,9 @@ uv run python apps/train/train_main.py \
     --batch-size           256 \
     --num-workers          8 \
     --max-seq-length       64 \
-    --hf-dataset-name      "${HF_HOME}/cc3m-wds" \
+    --hf-dataset-name      "${CC3M_LOCAL_DIR}" \
     --hf-dataset-split     train \
-    --val-hf-dataset-name  "${HF_HOME}/cc3m-wds" \
+    --val-hf-dataset-name  "${CC3M_LOCAL_DIR}" \
     --val-hf-dataset-split train \
     --image-field          jpg \
     --caption-field        txt \

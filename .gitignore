@@ -1,6 +1,5 @@
-# Scripts — only .sample files are tracked; real scripts contain local config
-scripts/*
-!scripts/*.sample
+# Local environment — contains paths and secrets
+.env
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
