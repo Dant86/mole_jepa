@@ -104,7 +104,7 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
                     print(f"[cc3m] skipping {raw!r}: {exc}")
                     continue
             else:
-                image = raw
+                image = raw.convert("RGB")
             pixel_values = image_transform(image)
             input_ids, attention_mask = tokenize(example[caption_field])
             yield pixel_values, input_ids, attention_mask
