@@ -1,5 +1,6 @@
 """Unit tests for CC3MDataset."""
 
+import collections.abc
 import typing
 import unittest.mock
 
@@ -36,7 +37,7 @@ def _make_transform_mocks(
 
 
 @pytest.fixture
-def dataset() -> cc3m.CC3MDataset:
+def dataset() -> collections.abc.Iterator[cc3m.CC3MDataset]:
     examples = [_make_example(f"caption {i}") for i in range(_N_EXAMPLES)]
     hf_dataset = unittest.mock.MagicMock()
     hf_dataset.__iter__ = unittest.mock.Mock(return_value=iter(examples))
@@ -59,7 +60,7 @@ def dataset() -> cc3m.CC3MDataset:
             return_value=tokenize,
         ),
     ):
-        return cc3m.CC3MDataset(hf_dataset, _make_config())
+        yield cc3m.CC3MDataset(hf_dataset, _make_config())
 
 
 class TestCC3MDataset:
@@ -103,8 +104,7 @@ class TestCC3MDataset:
             ),
         ):
             ds = cc3m.CC3MDataset(hf_dataset, _make_config())
-
-        assert len(list(ds)) == 2
+            assert len(list(ds)) == 2
 
     def test_worker_init_fn_shards_dataset(self, dataset: cc3m.CC3MDataset) -> None:
         # Save a reference before worker_init_fn reassigns dataset._dataset.

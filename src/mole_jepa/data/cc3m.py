@@ -44,26 +44,31 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
     ) -> None:
         super().__init__()
         self._dataset = hf_dataset
-        self._image_transform = transforms.build_image_transform(
-            config.image_processor_model_name
-        )
-        self._tokenize = transforms.build_tokenizer(
-            config.tokenizer_model_name, config.max_seq_length
-        )
+        self._config = config
 
     def __iter__(
         self,
     ) -> collections.abc.Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Iterate over ``(pixel_values, input_ids, attention_mask)`` triples.
 
+        Transforms are built here rather than in ``__init__`` so that the
+        dataset remains picklable for multi-worker DataLoaders. Each worker
+        process constructs its own transforms after the dataset is forked.
+
         Yields:
             A tuple of ``(pixel_values, input_ids, attention_mask)`` tensors
             for each valid example in the stream.
         """
+        image_transform = transforms.build_image_transform(
+            self._config.image_processor_model_name
+        )
+        tokenize = transforms.build_tokenizer(
+            self._config.tokenizer_model_name, self._config.max_seq_length
+        )
         for example in self._dataset:
             try:
-                pixel_values = self._image_transform(example["image"])
-                input_ids, attention_mask = self._tokenize(example["caption"])
+                pixel_values = image_transform(example["image"])
+                input_ids, attention_mask = tokenize(example["caption"])
                 yield pixel_values, input_ids, attention_mask
             except Exception:
                 _log.debug("Skipping malformed example.", exc_info=True)
