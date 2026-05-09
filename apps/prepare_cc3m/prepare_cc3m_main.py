@@ -222,12 +222,15 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for split in args.splits:
-        _process_split(split, output_dir, args.max_workers)
+        split_dir = output_dir / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+        _process_split(split, split_dir, args.max_workers)
 
-    size_gb = sum(f.stat().st_size for f in output_dir.glob("*.tar")) / 1e9
+    size_gb = sum(f.stat().st_size for f in output_dir.rglob("*.tar")) / 1e9
     print(f"\nTotal on disk: {size_gb:.1f} GB")
     print("\nPass to train script:")
-    print(f"  --hf-dataset-name {output_dir}")
+    print(f"  --hf-dataset-name      {output_dir / 'train'}")
+    print(f"  --val-hf-dataset-name  {output_dir / 'validation'}")
 
 
 if __name__ == "__main__":

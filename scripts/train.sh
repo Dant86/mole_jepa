@@ -64,10 +64,10 @@ uv run python apps/train/train_main.py \
     --batch-size           256 \
     --num-workers          8 \
     --max-seq-length       64 \
-    --hf-dataset-name      "${CC3M_LOCAL_DIR}" \
+    --hf-dataset-name      "${CC3M_LOCAL_DIR}/train" \
     --hf-dataset-split     train \
-    --val-hf-dataset-name  "${CC3M_LOCAL_DIR}" \
-    --val-hf-dataset-split train \
+    --val-hf-dataset-name  "${CC3M_LOCAL_DIR}/validation" \
+    --val-hf-dataset-split validation \
     --image-field          jpg \
     --caption-field        txt \
     --embed-dim            256 \
