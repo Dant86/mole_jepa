@@ -13,6 +13,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "torch",
+    "torchvision",
     "plotly",
     "datasets",
     "Pillow",
