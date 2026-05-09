@@ -15,7 +15,7 @@ class JEPALossOutput:
 
     Attributes:
         loss: Total loss:
-            ``lam * loss_mse + (1 - lam) * (loss_reg_image + loss_reg_text)``.
+            ``lam * (loss_reg_image + loss_reg_text) + (1 - lam) * loss_mse``.
         loss_mse: MSE between ``z_hat_t`` and ``z_t``.
         loss_reg_image: SIGReg penalty on the image embeddings ``z_v``.
         loss_reg_text: SIGReg penalty on the text embeddings ``z_t``.
@@ -32,16 +32,17 @@ class JEPALoss(nn.Module):
 
     Computes (following LeJEPA, eq. 4):
 
-        L = λ · MSE(ẑ_t, z_t) + (1 - λ) · (SIGReg(z_v) + SIGReg(z_t))
+        L = λ · (SIGReg(z_v) + SIGReg(z_t)) + (1 - λ) · MSE(ẑ_t, z_t)
 
-    λ ∈ [0, 1] trades off reconstruction against regularization. The LeJEPA
-    paper recommends λ = 0.05, heavily weighting SIGReg to prevent collapse.
+    λ ∈ [0, 1] trades off regularization against reconstruction. The LeJEPA
+    paper recommends λ = 0.05, lightly weighting SIGReg while keeping MSE as
+    the dominant signal.
 
     Args:
         regularizer: SIGReg instance applied independently to ``z_v`` and
             ``z_t``.
-        lam: Reconstruction weight λ; ``1 - lam`` scales the regularization
-            term. Default 0.05 per the LeJEPA recommendation.
+        lam: Regularization weight λ; ``1 - lam`` scales the MSE term.
+            Default 0.05 per the LeJEPA recommendation.
     """
 
     def __init__(
@@ -69,7 +70,7 @@ class JEPALoss(nn.Module):
 
         loss_reg = loss_reg_image + loss_reg_text
         return JEPALossOutput(
-            loss=self.lam * loss_mse + (1 - self.lam) * loss_reg,
+            loss=self.lam * loss_reg + (1 - self.lam) * loss_mse,
             loss_mse=loss_mse,
             loss_reg_image=loss_reg_image,
             loss_reg_text=loss_reg_text,

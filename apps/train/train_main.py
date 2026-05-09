@@ -16,7 +16,7 @@ import torch.utils.data
 
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
-from mole_jepa import losses, models
+from mole_jepa import factory, losses, models
 
 _CHECKPOINT_FILE = "checkpoint.pt"
 _FINAL_MODEL_FILE = "model.pt"
@@ -193,7 +193,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=mcfg.jepa_lam,
         help=(
-            "Reconstruction weight λ for JEPALoss. Regularization weight is "
+            "Regularization weight λ for JEPALoss. MSE weight is "
             "1 - λ. Default 0.05 per the LeJEPA paper."
         ),
     )
@@ -420,6 +420,33 @@ def log_stats(
         f.write(json.dumps(record) + "\n")
 
 
+def _forward_batch(
+    model: models.MoLeJEPA,
+    loss_fn: torch.nn.Module,
+    batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Move a batch to ``device``, run the model, and compute loss components.
+
+    Args:
+        model: The MoLeJEPA model.
+        loss_fn: Either a :class:`~mole_jepa.losses.JEPALoss` or
+            :class:`~mole_jepa.losses.InfoNCELoss` module.
+        batch: ``(pixel_values, input_ids, attention_mask)`` tensors.
+        device: Device to transfer tensors to before the forward pass.
+
+    Returns:
+        ``(loss_tensor, components)`` — same contract as
+        :func:`_forward_loss`.
+    """
+    pixel_values, input_ids, attention_mask = batch
+    pixel_values = pixel_values.to(device)
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
+    output = model(pixel_values, input_ids, attention_mask)
+    return _forward_loss(loss_fn, output)
+
+
 def _forward_loss(
     loss_fn: torch.nn.Module,
     output: models.MoLeJEPAOutput,
@@ -472,14 +499,8 @@ def train_step(
         Dict mapping component name to scalar float (e.g. ``"loss"``,
         ``"loss_mse"``, ``"loss_reg_image"``, ``"loss_reg_text"``).
     """
-    pixel_values, input_ids, attention_mask = batch
-    pixel_values = pixel_values.to(device)
-    input_ids = input_ids.to(device)
-    attention_mask = attention_mask.to(device)
-
     optimizer.zero_grad()
-    output = model(pixel_values, input_ids, attention_mask)
-    loss, components = _forward_loss(loss_fn, output)
+    loss, components = _forward_batch(model, loss_fn, batch, device)
     loss.backward()
     if grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -572,13 +593,7 @@ def eval_epoch(
         for batch_idx, batch in enumerate(loader):
             if max_batches is not None and batch_idx >= max_batches:
                 break
-            pixel_values, input_ids, attention_mask = batch
-            pixel_values = pixel_values.to(device)
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-
-            output = model(pixel_values, input_ids, attention_mask)
-            _, components = _forward_loss(loss_fn, output)
+            _, components = _forward_batch(model, loss_fn, batch, device)
             for k, v in components.items():
                 totals[k] = totals.get(k, 0.0) + v
             n_batches += 1
@@ -605,7 +620,7 @@ def main() -> None:
     data_config = construct_data_config(args, model_config)
 
     loc = model_location(args.checkpoint_dir, model_config)
-    model, loss_fn = config_module.build(model_config)
+    model, loss_fn = factory.build(model_config)
     model = model.to(device)
     loss_fn = loss_fn.to(device)
 

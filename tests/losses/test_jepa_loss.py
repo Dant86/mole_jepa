@@ -47,17 +47,18 @@ class TestJEPALoss:
         result = loss_fn(_make_output(z_hat_t=z_t.clone(), z_t=z_t))
         assert result.loss_mse.item() == pytest.approx(0.0, abs=1e-6)
 
-    def test_lam_one_loss_equals_mse(self) -> None:
-        """When lam=1 the regularization term vanishes and loss == MSE."""
+    def test_lam_zero_loss_equals_mse(self) -> None:
+        """When lam=0 the regularization term vanishes and loss == MSE."""
         reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-        loss_fn = losses.JEPALoss(regularizer=reg, lam=1.0)
+        loss_fn = losses.JEPALoss(regularizer=reg, lam=0.0)
         result = loss_fn(_make_output())
         assert result.loss.item() == pytest.approx(result.loss_mse.item())
 
     def test_loss_decomposition(self, loss_fn: losses.JEPALoss) -> None:
         result = loss_fn(_make_output())
-        expected = _LAM * result.loss_mse.item() + (1 - _LAM) * (
-            result.loss_reg_image.item() + result.loss_reg_text.item()
+        expected = (
+            _LAM * (result.loss_reg_image.item() + result.loss_reg_text.item())
+            + (1 - _LAM) * result.loss_mse.item()
         )
         assert result.loss.item() == pytest.approx(expected, rel=1e-5)
 

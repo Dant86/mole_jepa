@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from mole_jepa import config as config_module
+from mole_jepa import factory as factory_module
 from mole_jepa.losses import InfoNCELoss
 
 _HIDDEN = 64  # hidden size of the fake HF backbones
@@ -80,7 +81,7 @@ def model_and_loss(
         "transformers.AutoModel.from_pretrained",
         side_effect=[_FakeViT(), _FakeBERT()],
     ):
-        return config_module.build(cfg)
+        return factory_module.build(cfg)
 
 
 @pytest.fixture

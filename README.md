@@ -17,14 +17,16 @@ embedding space `ℝᵈ`. A lightweight MLP predictor `g` is trained to predict
 
 The model and loss are intentionally decoupled. `MoLeJEPA.forward` returns the
 raw embeddings `(f(x), g(f(x)), h(y))`; a separate loss module is composed on
-top. The default training objective combines MSE prediction loss with SIGReg
-regularization on both encoder outputs to prevent representational collapse:
+top. The default training objective follows LeJEPA (eq. 4), trading off
+reconstruction against regularization with a single scalar λ:
 
 ```
-L = MSE(g(f(x)), h(y))  +  λ · (SIGReg(f(x)) + SIGReg(h(y)))
+L = λ · (SIGReg(f(x)) + SIGReg(h(y)))  +  (1 - λ) · MSE(g(f(x)), h(y))
 ```
 
-An InfoNCE contrastive loss is also provided as an alternative or complement.
+The default λ = 0.05 (per the LeJEPA paper), keeping MSE as the dominant
+signal while a small regularization term prevents representational collapse.
+An InfoNCE contrastive loss is also provided as an alternative.
 
 ## Project Structure
 
@@ -35,12 +37,14 @@ src/mole_jepa/
 │   ├── predictor.py      # MLP predictor g
 │   └── mole_jepa.py      # Top-level model and MoLeJEPAOutput
 ├── losses/
-│   ├── jepa_loss.py      # JEPALoss (MSE + SIGReg)
+│   ├── jepa_loss.py      # JEPALoss (λ·MSE + (1-λ)·SIGReg)
 │   └── info_nce.py       # InfoNCELoss
 ├── regularizers/
 │   └── sig_reg.py        # SIGReg
-└── test_statistics/
-    └── epps_pulley.py    # EppsPulley base + Gaussian / Laplace variants
+├── test_statistics/
+│   └── epps_pulley.py    # EppsPulley base + Gaussian / Laplace variants
+├── config.py             # Plain-data ModelConfig and DataConfig
+└── factory.py            # build(ModelConfig) → (MoLeJEPA, loss)
 ```
 
 ## Development
@@ -160,10 +164,12 @@ reaches the storage budget configured in `prepare_cc3m_main.py`.
 sbatch scripts/train.sh
 ```
 
-The script auto-detects an existing checkpoint in `$CHECKPOINT_DIR` and passes
-`--resume` if one is found. On preemption, SLURM sends `SIGUSR1` five minutes
-before the wall-time limit; the train script catches it, saves a checkpoint,
-and exits so the job can be requeued.
+The script auto-resumes if a checkpoint for the exact current hyperparameter
+configuration exists in `$CHECKPOINT_DIR` (matched by a SHA-256 hash of the
+config). Changing any hyperparameter starts a fresh run automatically — no
+flags needed. On preemption, SLURM sends `SIGUSR1` five minutes before the
+wall-time limit; the train script catches it, saves a checkpoint, and exits so
+the job can be requeued.
 
 Logs are written to `$LOG_DIR/train_<job_id>.out` and `.err`.
 Training stats (loss, batch counts) are appended to `stats.jsonl` inside the
