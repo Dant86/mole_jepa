@@ -28,6 +28,7 @@ if ! command -v uv &> /dev/null; then
 fi
 
 export HF_HOME="/scratch/vpathak/hf_cache"
+export PYTHONUNBUFFERED=1  # flush stdout immediately so logs appear in real time
 OUTPUT_DIR="${HF_HOME}/cc3m-local"
 
 cd "$SLURM_SUBMIT_DIR"

@@ -31,6 +31,7 @@ _RESIZE_PX = 256  # resize shorter edge; image processor crops to 224
 _TIMEOUT_S = 3  # per-image HTTP timeout — most dead URLs fail in <100 ms
 _JPEG_QUALITY = 85
 _DEFAULT_WORKERS = 64  # HTTP is I/O-bound; more threads than cores is fine
+_STORAGE_BUDGET_GB = 45.0  # stop writing shards before the disk fills up
 
 
 def _fetch(args: tuple[int, str, str]) -> tuple[int, str | None, bytes | None]:
@@ -158,6 +159,7 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
         if i >= urls_consumed
     )
 
+    budget_bytes = _STORAGE_BUDGET_GB * 1e9
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         for idx, caption, jpg in pool.map(_fetch, args_iter, chunksize=256):
             urls_consumed += 1
@@ -167,6 +169,13 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
             ok += 1
             pending.append((idx, caption, jpg))
             if len(pending) == _SHARD_SIZE:
+                used = sum(f.stat().st_size for f in output_dir.glob("*.tar"))
+                if used >= budget_bytes:
+                    print(
+                        f"  storage budget ({_STORAGE_BUDGET_GB:.0f} GB) reached "
+                        f"after {ok:,} images — stopping."
+                    )
+                    break
                 path = _write_shard(output_dir, shard_idx, pending)
                 print(f"  shard {shard_idx:05d} → {path}  (ok={ok} skip={skip})")
                 pending = []

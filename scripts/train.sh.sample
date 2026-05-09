@@ -36,6 +36,7 @@ fi
 # Point HuggingFace cache at a persistent scratch directory so dataset shards
 # are only downloaded once and reused across jobs. Set this to your scratch path.
 export HF_HOME="/scratch/vpathak/hf_cache"
+export PYTHONUNBUFFERED=1  # flush stdout immediately so logs appear in real time
 
 # SLURM copies the script to a spool directory; use SLURM_SUBMIT_DIR so that
 # relative paths (checkpoints/, logs/, apps/) resolve correctly.
