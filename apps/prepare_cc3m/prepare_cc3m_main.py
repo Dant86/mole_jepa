@@ -86,8 +86,47 @@ def _write_shard(
     return path
 
 
+def _progress_path(output_dir: Path, split: str) -> Path:
+    return output_dir / f".progress_{split}.json"
+
+
+def _load_progress(output_dir: Path, split: str) -> tuple[int, int, int, int]:
+    """Read saved progress for a split.
+
+    Returns:
+        ``(urls_consumed, ok, skip, shard_idx)`` — all zero if no progress file.
+    """
+    import json
+
+    p = _progress_path(output_dir, split)
+    if not p.exists():
+        return 0, 0, 0, 0
+    data = json.loads(p.read_text())
+    return data["urls_consumed"], data["ok"], data["skip"], data["shard_idx"]
+
+
+def _save_progress(
+    output_dir: Path, split: str, urls_consumed: int, ok: int, skip: int, shard_idx: int
+) -> None:
+    import json
+
+    _progress_path(output_dir, split).write_text(
+        json.dumps(
+            {
+                "urls_consumed": urls_consumed,
+                "ok": ok,
+                "skip": skip,
+                "shard_idx": shard_idx,
+            }
+        )
+    )
+
+
 def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
     """Download all reachable images for one dataset split.
+
+    Resumes automatically from saved progress if the job was previously
+    interrupted — already-written shards are left untouched.
 
     Args:
         split: HuggingFace split name, e.g. ``"train"`` or ``"validation"``.
@@ -100,9 +139,14 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
         split=split,
     )
 
+    urls_consumed, ok, skip, shard_idx = _load_progress(output_dir, split)
+    if urls_consumed:
+        print(
+            f"  resuming from URL {urls_consumed:,} "
+            f"(shard {shard_idx:05d}, ok={ok:,} skip={skip:,})"
+        )
+
     pending: list[tuple[int, str, bytes]] = []
-    shard_idx = 0
-    ok = skip = 0
 
     args_iter = (
         (
@@ -111,10 +155,12 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
             cast(dict[str, Any], row)["caption"],
         )  # noqa: E501
         for i, row in enumerate(ds)
+        if i >= urls_consumed
     )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         for idx, caption, jpg in pool.map(_fetch, args_iter, chunksize=256):
+            urls_consumed += 1
             if jpg is None or caption is None:
                 skip += 1
                 continue
@@ -125,11 +171,14 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
                 print(f"  shard {shard_idx:05d} → {path}  (ok={ok} skip={skip})")
                 pending = []
                 shard_idx += 1
+                _save_progress(output_dir, split, urls_consumed, ok, skip, shard_idx)
 
     if pending:
         path = _write_shard(output_dir, shard_idx, pending)
         print(f"  shard {shard_idx:05d} → {path}  (ok={ok} skip={skip})")
+        shard_idx += 1
 
+    _progress_path(output_dir, split).unlink(missing_ok=True)
     print(f"{split}: {ok:,} images downloaded, {skip:,} skipped")
 
 
