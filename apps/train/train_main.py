@@ -43,11 +43,6 @@ def parse_args() -> argparse.Namespace:
 
     # ── training ──────────────────────────────────────────────────────────────
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Load the latest checkpoint and resume training.",
-    )
-    parser.add_argument(
         "--checkpoint-dir",
         required=True,
         help="Directory from which to read/write model checkpoints.",
@@ -194,10 +189,13 @@ def parse_args() -> argparse.Namespace:
         help="Number of random projection directions used by SIGReg.",
     )
     parser.add_argument(
-        "--jepa-reg-weight",
+        "--jepa-lam",
         type=float,
-        default=mcfg.jepa_reg_weight,
-        help="Weighting factor λ for the SIGReg term in JEPALoss.",
+        default=mcfg.jepa_lam,
+        help=(
+            "Reconstruction weight λ for JEPALoss. Regularization weight is "
+            "1 - λ. Default 0.05 per the LeJEPA paper."
+        ),
     )
     parser.add_argument(
         "--info-nce-temperature",
@@ -227,7 +225,7 @@ def construct_model_config(args: argparse.Namespace) -> config_module.ModelConfi
         contrastive=args.use_contrastive_loss,
         sigreg_dist=args.sigreg_dist,
         sigreg_n_directions=args.sigreg_n_directions,
-        jepa_reg_weight=args.jepa_reg_weight,
+        jepa_lam=args.jepa_lam,
         info_nce_temperature=args.info_nce_temperature,
     )
 
@@ -384,9 +382,9 @@ def save_final_model(
 def log_stats(
     model_loc: pathlib.Path,
     epoch: int,
-    train_loss: float,
+    train_stats: dict[str, float],
     train_batches: int,
-    val_loss: float,
+    val_stats: dict[str, float],
     val_batches: int,
 ) -> None:
     """Append one stats record to ``stats.jsonl`` inside ``model_loc``.
@@ -394,20 +392,27 @@ def log_stats(
     Each line is a self-contained JSON object, making the file easy to tail,
     parse incrementally, or load with ``pandas.read_json(..., lines=True)``.
 
+    For :class:`~mole_jepa.losses.JEPALoss`, the record includes
+    ``train_loss``, ``train_loss_mse``, ``train_loss_reg_image``, and
+    ``train_loss_reg_text`` (and their ``val_`` equivalents) so each
+    component can be tracked independently.
+
     Args:
         model_loc: Directory in which to write the stats file.
         epoch: Completed epoch number (0-indexed).
-        train_loss: Average training loss for this epoch.
+        train_stats: Mapping of component name to average training value
+            (e.g. ``{"loss": …, "loss_mse": …, "loss_reg_image": …,
+            "loss_reg_text": …}``).
         train_batches: Number of training batches processed this epoch.
-        val_loss: Average validation loss for this epoch.
+        val_stats: Same structure as ``train_stats`` for the validation set.
         val_batches: Number of validation batches processed this epoch.
     """
-    record = {
+    record: dict[str, Any] = {
         "epoch": epoch,
-        "train_loss": train_loss,
         "train_batches": train_batches,
-        "val_loss": val_loss,
         "val_batches": val_batches,
+        **{f"train_{k}": v for k, v in train_stats.items()},
+        **{f"val_{k}": v for k, v in val_stats.items()},
         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     os.makedirs(model_loc, exist_ok=True)
@@ -415,11 +420,11 @@ def log_stats(
         f.write(json.dumps(record) + "\n")
 
 
-def _compute_loss(
+def _forward_loss(
     loss_fn: torch.nn.Module,
     output: models.MoLeJEPAOutput,
-) -> torch.Tensor:
-    """Dispatch to the correct loss module and return a scalar loss tensor.
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Dispatch to the correct loss module and return the loss with components.
 
     Args:
         loss_fn: Either a :class:`~mole_jepa.losses.InfoNCELoss` or
@@ -427,11 +432,21 @@ def _compute_loss(
         output: Output from a :class:`~mole_jepa.models.MoLeJEPA` forward pass.
 
     Returns:
-        Scalar loss tensor.
+        ``(loss_tensor, components)`` where ``components`` maps component name
+        to its scalar float value. For :class:`~mole_jepa.losses.JEPALoss`
+        this includes ``"loss"``, ``"loss_mse"``, ``"loss_reg_image"``, and
+        ``"loss_reg_text"``; for InfoNCE just ``"loss"``.
     """
     if isinstance(loss_fn, losses.InfoNCELoss):
-        return loss_fn(output.z_v, output.z_t)
-    return loss_fn(output).loss
+        loss = loss_fn(output.z_v, output.z_t)
+        return loss, {"loss": loss.item()}
+    jepa_out = loss_fn(output)
+    return jepa_out.loss, {
+        "loss": jepa_out.loss.item(),
+        "loss_mse": jepa_out.loss_mse.item(),
+        "loss_reg_image": jepa_out.loss_reg_image.item(),
+        "loss_reg_text": jepa_out.loss_reg_text.item(),
+    }
 
 
 def train_step(
@@ -441,8 +456,8 @@ def train_step(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     grad_clip: float,
-) -> float:
-    """Run a single forward/backward pass and return the scalar loss.
+) -> dict[str, float]:
+    """Run a single forward/backward pass and return the loss components.
 
     Args:
         model: The MoLeJEPA model.
@@ -454,7 +469,8 @@ def train_step(
         grad_clip: Max gradient norm (0 disables clipping).
 
     Returns:
-        Scalar training loss for this batch.
+        Dict mapping component name to scalar float (e.g. ``"loss"``,
+        ``"loss_mse"``, ``"loss_reg_image"``, ``"loss_reg_text"``).
     """
     pixel_values, input_ids, attention_mask = batch
     pixel_values = pixel_values.to(device)
@@ -463,13 +479,13 @@ def train_step(
 
     optimizer.zero_grad()
     output = model(pixel_values, input_ids, attention_mask)
-    loss = _compute_loss(loss_fn, output)
+    loss, components = _forward_loss(loss_fn, output)
     loss.backward()
     if grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
 
-    return loss.item()
+    return components
 
 
 def train_epoch(
@@ -482,7 +498,7 @@ def train_epoch(
     grad_clip: float,
     log_interval: int = 100,
     max_batches: int | None = None,
-) -> tuple[float, int]:
+) -> tuple[dict[str, float], int]:
     """Train for one full pass over the dataloader.
 
     Args:
@@ -497,25 +513,30 @@ def train_epoch(
         max_batches: Stop after this many batches. ``None`` means no limit.
 
     Returns:
-        Tuple of ``(avg_loss, n_batches)`` for the epoch.
+        Tuple of ``(avg_components, n_batches)`` where ``avg_components``
+        maps component name (e.g. ``"loss"``, ``"loss_mse"``) to its epoch
+        average.
     """
     model.train()
-    total_loss = 0.0
+    totals: dict[str, float] = {}
     n_batches = 0
 
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
-        step_loss = train_step(model, loss_fn, batch, optimizer, device, grad_clip)
-        total_loss += step_loss
+        components = train_step(model, loss_fn, batch, optimizer, device, grad_clip)
+        for k, v in components.items():
+            totals[k] = totals.get(k, 0.0) + v
         n_batches += 1
 
         if (batch_idx + 1) % log_interval == 0:
-            print(f"epoch {epoch:>3}  step {batch_idx + 1:>6}  loss {step_loss:.4f}")
+            parts = "  ".join(f"{k} {v:.4f}" for k, v in components.items())
+            print(f"epoch {epoch:>3}  step {batch_idx + 1:>6}  {parts}")
 
-    avg_loss = total_loss / max(n_batches, 1)
-    print(f"epoch {epoch:>3}  avg_loss {avg_loss:.4f}  batches {n_batches}")
-    return avg_loss, n_batches
+    avgs = {k: v / max(n_batches, 1) for k, v in totals.items()}
+    parts = "  ".join(f"{k} {v:.4f}" for k, v in avgs.items())
+    print(f"epoch {epoch:>3}  train  {parts}  batches {n_batches}")
+    return avgs, n_batches
 
 
 def eval_epoch(
@@ -525,7 +546,7 @@ def eval_epoch(
     device: torch.device,
     epoch: int,
     max_batches: int | None = None,
-) -> tuple[float, int]:
+) -> tuple[dict[str, float], int]:
     """Evaluate the model over the validation dataloader.
 
     Runs in :func:`torch.no_grad` with the model in eval mode.
@@ -539,10 +560,12 @@ def eval_epoch(
         max_batches: Stop after this many batches. ``None`` means no limit.
 
     Returns:
-        Tuple of ``(avg_val_loss, n_batches)`` for the epoch.
+        Tuple of ``(avg_components, n_batches)`` where ``avg_components``
+        maps component name (e.g. ``"loss"``, ``"loss_mse"``) to its epoch
+        average.
     """
     model.eval()
-    total_loss = 0.0
+    totals: dict[str, float] = {}
     n_batches = 0
 
     with torch.no_grad():
@@ -555,14 +578,16 @@ def eval_epoch(
             attention_mask = attention_mask.to(device)
 
             output = model(pixel_values, input_ids, attention_mask)
-            loss = _compute_loss(loss_fn, output)
-            total_loss += loss.item()
+            _, components = _forward_loss(loss_fn, output)
+            for k, v in components.items():
+                totals[k] = totals.get(k, 0.0) + v
             n_batches += 1
 
     model.train()
-    avg_val_loss = total_loss / max(n_batches, 1)
-    print(f"epoch {epoch:>3}  val_loss  {avg_val_loss:.4f}  batches {n_batches}")
-    return avg_val_loss, n_batches
+    avgs = {k: v / max(n_batches, 1) for k, v in totals.items()}
+    parts = "  ".join(f"{k} {v:.4f}" for k, v in avgs.items())
+    print(f"epoch {epoch:>3}  val    {parts}  batches {n_batches}")
+    return avgs, n_batches
 
 
 def main() -> None:
@@ -590,17 +615,27 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
 
+    # ── resume detection ──────────────────────────────────────────────────────
+    # Auto-resume if and only if a checkpoint for this exact config hash
+    # exists. A different config (e.g. after a hyperparameter change) produces
+    # a different hash → different loc → no checkpoint found → fresh run.
+    checkpoint_file = loc / _CHECKPOINT_FILE
+    resuming = checkpoint_file.exists()
+
     start_epoch = 0
-    if args.resume:
+    if resuming:
         model_state, opt_state, start_epoch = load_checkpoint(loc)
         model.load_state_dict(model_state)
         if opt_state is not None:
             optimizer.load_state_dict(opt_state)
         start_epoch += 1  # resume from the next epoch
+        print(f"Resuming from checkpoint at epoch {start_epoch} ({loc})")
+    else:
+        print(f"Starting fresh run ({loc})")
 
     # ── preemption handler ────────────────────────────────────────────────────
     # SIGUSR1 is sent by SLURM five minutes before the wall-time limit.
-    # Save a checkpoint so the job can be requeued with --resume.
+    # Save a checkpoint so the job can be requeued automatically.
     current_epoch = start_epoch
 
     def _checkpoint_and_exit(*_: object) -> None:
@@ -612,7 +647,7 @@ def main() -> None:
 
     # ── stats file ────────────────────────────────────────────────────────────
     # Truncate on a fresh run; on resume, keep history and continue appending.
-    if not args.resume:
+    if not resuming:
         (loc / _STATS_FILE).unlink(missing_ok=True)
 
     # ── data ──────────────────────────────────────────────────────────────────
@@ -630,7 +665,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         current_epoch = epoch
 
-        train_loss, train_batches = train_epoch(
+        train_stats, train_batches = train_epoch(
             model,
             loss_fn,
             loader,
@@ -642,7 +677,7 @@ def main() -> None:
         )
 
         if (epoch + 1) % 5 == 0:
-            val_loss, val_batches = eval_epoch(
+            val_stats, val_batches = eval_epoch(
                 model,
                 loss_fn,
                 val_loader,
@@ -650,7 +685,7 @@ def main() -> None:
                 epoch,
                 max_batches=args.max_batches,
             )
-            log_stats(loc, epoch, train_loss, train_batches, val_loss, val_batches)
+            log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
 
     # Training completed successfully.
     # Save the final model weights, then remove the partial checkpoint — it was

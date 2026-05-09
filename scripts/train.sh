@@ -48,13 +48,9 @@ exec > "${LOG_DIR}/train_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/train_${SLURM_JOB_I
 mkdir -p "${CHECKPOINT_DIR}"
 uv sync
 
-# ── resume detection ──────────────────────────────────────────────────────────
-RESUME_FLAG=""
-if compgen -G "${CHECKPOINT_DIR}/*/checkpoint.pt" > /dev/null 2>&1; then
-    RESUME_FLAG="--resume"
-fi
-
 # ── train ─────────────────────────────────────────────────────────────────────
+# Resume is auto-detected inside train_main.py based on the config hash —
+# no need to pass a flag here.
 uv run python apps/train/train_main.py \
     --checkpoint-dir       "${CHECKPOINT_DIR}" \
     --num-epochs           100 \
@@ -73,6 +69,4 @@ uv run python apps/train/train_main.py \
     --embed-dim            256 \
     --predictor-hidden-dim 512 \
     --predictor-n-layers   2 \
-    --sigreg-n-directions  128 \
-    --jepa-reg-weight      1.0 \
-    $RESUME_FLAG
+    --sigreg-n-directions  128

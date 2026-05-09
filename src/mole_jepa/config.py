@@ -27,7 +27,8 @@ class ModelConfig:
             otherwise use :class:`~mole_jepa.losses.JEPALoss` with SIGReg.
         sigreg_dist: Target distribution for the Epps-Pulley statistic.
         sigreg_n_directions: Number of random projection directions in SIGReg.
-        jepa_reg_weight: Weighting factor λ for the SIGReg term in JEPALoss.
+        jepa_lam: Reconstruction weight λ for JEPALoss. The regularization
+            weight is ``1 - jepa_lam``. Default 0.05 per the LeJEPA paper.
         info_nce_temperature: Softmax temperature for InfoNCELoss.
     """
 
@@ -39,7 +40,7 @@ class ModelConfig:
     contrastive: bool = False
     sigreg_dist: Literal["gaussian", "laplace"] = "gaussian"
     sigreg_n_directions: int = 128
-    jepa_reg_weight: float = 1.0
+    jepa_lam: float = 0.05
     info_nce_temperature: float = 0.07
 
     def serialize(self) -> str:
@@ -122,7 +123,7 @@ def build(config: ModelConfig) -> tuple[models.MoLeJEPA, nn.Module]:
                 test_statistic=test_statistics.epps_pulley(config.sigreg_dist),
                 n_directions=config.sigreg_n_directions,
             ),
-            reg_weight=config.jepa_reg_weight,
+            lam=config.jepa_lam,
         )
 
     return model, loss

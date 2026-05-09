@@ -68,15 +68,13 @@ class TestBuild:
         assert isinstance(loss, losses.InfoNCELoss)
         assert loss.temperature == pytest.approx(temperature)
 
-    def test_jepa_reg_weight_propagates(
+    def test_jepa_lam_propagates(
         self, mock_pretrained: unittest.mock.MagicMock
     ) -> None:
-        reg_weight = 2.5
-        _, loss = config_module.build(
-            config_module.ModelConfig(jepa_reg_weight=reg_weight)
-        )
+        lam = 0.2
+        _, loss = config_module.build(config_module.ModelConfig(jepa_lam=lam))
         assert isinstance(loss, losses.JEPALoss)
-        assert loss.reg_weight == pytest.approx(reg_weight)
+        assert loss.lam == pytest.approx(lam)
 
 
 class TestSerialize:

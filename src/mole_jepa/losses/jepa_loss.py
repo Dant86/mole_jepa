@@ -14,37 +14,44 @@ class JEPALossOutput:
     """Decomposed outputs from a JEPALoss forward pass.
 
     Attributes:
-        loss: Total loss: ``loss_mse + reg_weight * loss_reg``.
+        loss: Total loss:
+            ``lam * loss_mse + (1 - lam) * (loss_reg_image + loss_reg_text)``.
         loss_mse: MSE between ``z_hat_t`` and ``z_t``.
-        loss_reg: SIGReg summed over the image and text embeddings.
+        loss_reg_image: SIGReg penalty on the image embeddings ``z_v``.
+        loss_reg_text: SIGReg penalty on the text embeddings ``z_t``.
     """
 
     loss: torch.Tensor
     loss_mse: torch.Tensor
-    loss_reg: torch.Tensor
+    loss_reg_image: torch.Tensor
+    loss_reg_text: torch.Tensor
 
 
 class JEPALoss(nn.Module):
     """MSE prediction loss with SIGReg regularization.
 
-    Computes:
+    Computes (following LeJEPA, eq. 4):
 
-        L = MSE(ẑ_t, z_t) + reg_weight * (SIGReg(z_v) + SIGReg(z_t))
+        L = λ · MSE(ẑ_t, z_t) + (1 - λ) · (SIGReg(z_v) + SIGReg(z_t))
+
+    λ ∈ [0, 1] trades off reconstruction against regularization. The LeJEPA
+    paper recommends λ = 0.05, heavily weighting SIGReg to prevent collapse.
 
     Args:
         regularizer: SIGReg instance applied independently to ``z_v`` and
             ``z_t``.
-        reg_weight: Weighting factor λ scaling the regularization term.
+        lam: Reconstruction weight λ; ``1 - lam`` scales the regularization
+            term. Default 0.05 per the LeJEPA recommendation.
     """
 
     def __init__(
         self,
         regularizer: nn.Module,
-        reg_weight: float = 1.0,
+        lam: float = 0.05,
     ) -> None:
         super().__init__()
         self.regularizer = regularizer
-        self.reg_weight = reg_weight
+        self.lam = lam
 
     def forward(self, output: models.MoLeJEPAOutput) -> JEPALossOutput:
         """Compute the JEPA loss for a batch of model outputs.
@@ -57,10 +64,13 @@ class JEPALoss(nn.Module):
             JEPALossOutput with the total loss and its components.
         """
         loss_mse = functional.mse_loss(output.z_hat_t, output.z_t)
-        loss_reg = self.regularizer(output.z_v) + self.regularizer(output.z_t)
+        loss_reg_image = self.regularizer(output.z_v)
+        loss_reg_text = self.regularizer(output.z_t)
 
+        loss_reg = loss_reg_image + loss_reg_text
         return JEPALossOutput(
-            loss=loss_mse + self.reg_weight * loss_reg,
+            loss=self.lam * loss_mse + (1 - self.lam) * loss_reg,
             loss_mse=loss_mse,
-            loss_reg=loss_reg,
+            loss_reg_image=loss_reg_image,
+            loss_reg_text=loss_reg_text,
         )

@@ -9,6 +9,7 @@ from mole_jepa.models import mole_jepa as mole_jepa_module
 _N = 64
 _D = 16
 _SEED = 42
+_LAM = 0.05  # matches the JEPALoss default
 
 
 def _make_output(
@@ -26,7 +27,7 @@ def _make_output(
 @pytest.fixture
 def loss_fn() -> losses.JEPALoss:
     reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-    return losses.JEPALoss(regularizer=reg, reg_weight=1.0)
+    return losses.JEPALoss(regularizer=reg, lam=_LAM)
 
 
 class TestJEPALoss:
@@ -38,22 +39,26 @@ class TestJEPALoss:
         result = loss_fn(_make_output())
         assert result.loss.shape == torch.Size([])
         assert result.loss_mse.shape == torch.Size([])
-        assert result.loss_reg.shape == torch.Size([])
+        assert result.loss_reg_image.shape == torch.Size([])
+        assert result.loss_reg_text.shape == torch.Size([])
 
     def test_perfect_prediction_zeroes_mse(self, loss_fn: losses.JEPALoss) -> None:
         z_t = torch.randn(_N, _D)
         result = loss_fn(_make_output(z_hat_t=z_t.clone(), z_t=z_t))
         assert result.loss_mse.item() == pytest.approx(0.0, abs=1e-6)
 
-    def test_reg_weight_zero_loss_equals_mse(self) -> None:
+    def test_lam_one_loss_equals_mse(self) -> None:
+        """When lam=1 the regularization term vanishes and loss == MSE."""
         reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-        loss_fn = losses.JEPALoss(regularizer=reg, reg_weight=0.0)
+        loss_fn = losses.JEPALoss(regularizer=reg, lam=1.0)
         result = loss_fn(_make_output())
         assert result.loss.item() == pytest.approx(result.loss_mse.item())
 
     def test_loss_decomposition(self, loss_fn: losses.JEPALoss) -> None:
         result = loss_fn(_make_output())
-        expected = result.loss_mse.item() + 1.0 * result.loss_reg.item()
+        expected = _LAM * result.loss_mse.item() + (1 - _LAM) * (
+            result.loss_reg_image.item() + result.loss_reg_text.item()
+        )
         assert result.loss.item() == pytest.approx(expected, rel=1e-5)
 
     def test_gradient_flows(self, loss_fn: losses.JEPALoss) -> None:
