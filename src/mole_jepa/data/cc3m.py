@@ -4,6 +4,7 @@ import collections.abc
 import io
 import urllib.error
 import urllib.request
+import warnings
 
 import datasets as hf_datasets
 import torch
@@ -87,6 +88,14 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
             A tuple of ``(pixel_values, input_ids, attention_mask)`` tensors
             for each valid example in the stream.
         """
+        # Corrupt EXIF metadata is common in web-scraped datasets. PIL recovers
+        # the pixel data correctly; suppress the warning to keep logs clean.
+        warnings.filterwarnings(
+            "ignore",
+            message="Corrupt EXIF data",
+            category=UserWarning,
+        )
+
         image_transform = transforms.build_image_transform(
             self._config.image_processor_model_name
         )

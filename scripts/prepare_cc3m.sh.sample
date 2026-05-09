@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Download CC3M images and pack into WebDataset shards on scratch.
+# Images are pre-resized to 256×256 (~12 KB each) so the full ~2 M reachable
+# images fit in ~25 GB. Dead URLs are skipped automatically.
+#
+# Usage:
+#   cp scripts/prepare_cc3m.sh.sample scripts/prepare_cc3m.sh  # set paths, then:
+#   sbatch scripts/prepare_cc3m.sh
+#
+# After completion, pass the output dir to the train script:
+#   --hf-dataset-name "${OUTPUT_DIR}"
+
+# ── SLURM directives ──────────────────────────────────────────────────────────
+#SBATCH --job-name=prepare_cc3m
+#SBATCH --partition=general
+#SBATCH --qos=general
+#SBATCH --cpus-per-task=16
+#SBATCH --time=06:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+
+export HF_HOME="/scratch/vpathak/hf_cache"
+OUTPUT_DIR="${HF_HOME}/cc3m-local"
+
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p logs
+uv sync
+
+uv run python apps/prepare_cc3m/prepare_cc3m_main.py \
+    --output-dir  "${OUTPUT_DIR}" \
+    --splits      train validation \
+    --max-workers "${SLURM_CPUS_PER_TASK}"

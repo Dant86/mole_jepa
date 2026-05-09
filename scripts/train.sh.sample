@@ -33,6 +33,10 @@ if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 
+# Point HuggingFace cache at a persistent scratch directory so dataset shards
+# are only downloaded once and reused across jobs. Set this to your scratch path.
+export HF_HOME="/scratch/vpathak/hf_cache"
+
 # SLURM copies the script to a spool directory; use SLURM_SUBMIT_DIR so that
 # relative paths (checkpoints/, logs/, apps/) resolve correctly.
 cd "$SLURM_SUBMIT_DIR"
@@ -51,6 +55,12 @@ if compgen -G "checkpoints/*/checkpoint.pt" > /dev/null 2>&1; then
 fi
 
 # ── train ─────────────────────────────────────────────────────────────────────
+# If you have pre-downloaded shards via scripts/download_data.sh, point
+# --hf-dataset-name at the local directory for fast disk-speed loading.
+# Otherwise use the HuggingFace identifier (slow — streams over the network).
+#
+#   Local  : --hf-dataset-name "${HF_HOME}/cc3m-wds"
+#   Remote : --hf-dataset-name pixparse/cc3m-wds
 uv run python apps/train/train_main.py \
     --checkpoint-dir       checkpoints \
     --num-epochs           100 \
@@ -58,11 +68,11 @@ uv run python apps/train/train_main.py \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
     --batch-size           256 \
-    --num-workers          4 \
+    --num-workers          8 \
     --max-seq-length       64 \
-    --hf-dataset-name      pixparse/cc3m-wds \
+    --hf-dataset-name      "${HF_HOME}/cc3m-wds" \
     --hf-dataset-split     train \
-    --val-hf-dataset-name  pixparse/cc3m-wds \
+    --val-hf-dataset-name  "${HF_HOME}/cc3m-wds" \
     --val-hf-dataset-split train \
     --image-field          jpg \
     --caption-field        txt \

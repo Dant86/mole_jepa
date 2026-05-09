@@ -58,6 +58,15 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Number of training epochs.",
     )
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=None,
+        help=(
+            "Stop each epoch after this many batches. "
+            "Useful for a quick smoke-test on the cluster (e.g. --max-batches 1)."
+        ),
+    )
 
     # ── optimiser ─────────────────────────────────────────────────────────────
     parser.add_argument(
@@ -472,6 +481,7 @@ def train_epoch(
     epoch: int,
     grad_clip: float,
     log_interval: int = 100,
+    max_batches: int | None = None,
 ) -> tuple[float, int]:
     """Train for one full pass over the dataloader.
 
@@ -484,6 +494,7 @@ def train_epoch(
         epoch: Current epoch number (for logging).
         grad_clip: Max gradient norm passed to :func:`train_step`.
         log_interval: Print a progress line every this many steps.
+        max_batches: Stop after this many batches. ``None`` means no limit.
 
     Returns:
         Tuple of ``(avg_loss, n_batches)`` for the epoch.
@@ -493,6 +504,8 @@ def train_epoch(
     n_batches = 0
 
     for batch_idx, batch in enumerate(loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
         step_loss = train_step(model, loss_fn, batch, optimizer, device, grad_clip)
         total_loss += step_loss
         n_batches += 1
@@ -511,6 +524,7 @@ def eval_epoch(
     loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
     device: torch.device,
     epoch: int,
+    max_batches: int | None = None,
 ) -> tuple[float, int]:
     """Evaluate the model over the validation dataloader.
 
@@ -522,6 +536,7 @@ def eval_epoch(
         loader: DataLoader yielding validation batches.
         device: Device on which to run the forward pass.
         epoch: Current epoch number (for logging).
+        max_batches: Stop after this many batches. ``None`` means no limit.
 
     Returns:
         Tuple of ``(avg_val_loss, n_batches)`` for the epoch.
@@ -531,7 +546,9 @@ def eval_epoch(
     n_batches = 0
 
     with torch.no_grad():
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
             pixel_values, input_ids, attention_mask = batch
             pixel_values = pixel_values.to(device)
             input_ids = input_ids.to(device)
@@ -621,11 +638,17 @@ def main() -> None:
             device,
             epoch=epoch,
             grad_clip=args.grad_clip,
+            max_batches=args.max_batches,
         )
 
         if (epoch + 1) % 5 == 0:
             val_loss, val_batches = eval_epoch(
-                model, loss_fn, val_loader, device, epoch
+                model,
+                loss_fn,
+                val_loader,
+                device,
+                epoch,
+                max_batches=args.max_batches,
             )
             log_stats(loc, epoch, train_loss, train_batches, val_loss, val_batches)
 
