@@ -90,7 +90,13 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
         if worker_info is None:
             return
         dataset: CC3MDataset = worker_info.dataset  # type: ignore[assignment]
+        n_shards = dataset._dataset.n_shards
+        num_shards = min(worker_info.num_workers, n_shards)
+        if worker_info.id >= num_shards:
+            # More workers than shards; the datasets library stops this worker
+            # from yielding data, so nothing more is needed here.
+            return
         dataset._dataset = dataset._dataset.shard(
-            num_shards=worker_info.num_workers,
+            num_shards=num_shards,
             index=worker_info.id,
         )

@@ -107,8 +107,9 @@ class TestCC3MDataset:
             assert len(list(ds)) == 2
 
     def test_worker_init_fn_shards_dataset(self, dataset: cc3m.CC3MDataset) -> None:
-        # Save a reference before worker_init_fn reassigns dataset._dataset.
+        # 4 workers, 4 shards — every worker gets one shard.
         original_hf_dataset = typing.cast(unittest.mock.MagicMock, dataset._dataset)
+        original_hf_dataset.n_shards = 4
 
         worker_info = unittest.mock.MagicMock()
         worker_info.num_workers = 4
@@ -121,6 +122,44 @@ class TestCC3MDataset:
             cc3m.CC3MDataset.worker_init_fn(worker_id=2)
 
         original_hf_dataset.shard.assert_called_once_with(num_shards=4, index=2)
+
+    def test_worker_init_fn_caps_to_available_shards(
+        self, dataset: cc3m.CC3MDataset
+    ) -> None:
+        # 4 workers but only 2 shards — sharding is capped, excess workers no-op.
+        original_hf_dataset = typing.cast(unittest.mock.MagicMock, dataset._dataset)
+        original_hf_dataset.n_shards = 2
+
+        worker_info = unittest.mock.MagicMock()
+        worker_info.num_workers = 4
+        worker_info.id = 1  # within range — should get shard 1 of 2
+        worker_info.dataset = dataset
+
+        with unittest.mock.patch(
+            "torch.utils.data.get_worker_info", return_value=worker_info
+        ):
+            cc3m.CC3MDataset.worker_init_fn(worker_id=1)
+
+        original_hf_dataset.shard.assert_called_once_with(num_shards=2, index=1)
+
+    def test_worker_init_fn_noop_for_excess_worker(
+        self, dataset: cc3m.CC3MDataset
+    ) -> None:
+        # Worker id beyond available shards — shard() must not be called.
+        mock_dataset = typing.cast(unittest.mock.MagicMock, dataset._dataset)
+        mock_dataset.n_shards = 1
+
+        worker_info = unittest.mock.MagicMock()
+        worker_info.num_workers = 4
+        worker_info.id = 2  # beyond n_shards=1
+        worker_info.dataset = dataset
+
+        with unittest.mock.patch(
+            "torch.utils.data.get_worker_info", return_value=worker_info
+        ):
+            cc3m.CC3MDataset.worker_init_fn(worker_id=2)
+
+        mock_dataset.shard.assert_not_called()
 
     def test_worker_init_fn_noop_outside_worker(
         self, dataset: cc3m.CC3MDataset
