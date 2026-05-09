@@ -1,3 +1,7 @@
+# Scripts — only .sample files are tracked; real scripts contain local config
+scripts/*
+!scripts/*.sample
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

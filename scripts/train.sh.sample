@@ -2,6 +2,7 @@
 # Submit a MoLeJEPA training job to the DSI cluster.
 #
 # Usage:
+#   cp scripts/train.sh.sample scripts/train.sh   # customise, then:
 #   sbatch scripts/train.sh
 #
 # Override any #SBATCH default at submission time, e.g.:
@@ -25,28 +26,49 @@
 # ── environment ───────────────────────────────────────────────────────────────
 set -euo pipefail
 
+export PATH="$HOME/.local/bin:$PATH"
+
+# Install uv if not already present.
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+
+# SLURM copies the script to a spool directory; use SLURM_SUBMIT_DIR so that
+# relative paths (checkpoints/, logs/, apps/) resolve correctly.
+cd "$SLURM_SUBMIT_DIR"
+
 # Create the log directory if it doesn't exist yet (SLURM won't do it for us).
 mkdir -p logs
 
-# Resolve the repo root regardless of where sbatch is invoked from.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+# Sync the virtualenv in case dependencies changed since the last run.
+uv sync
+
+# ── resume detection ──────────────────────────────────────────────────────────
+# The checkpoint lives under a config-hash subdirectory of --checkpoint-dir.
+RESUME_FLAG=""
+if compgen -G "checkpoints/*/checkpoint.pt" > /dev/null 2>&1; then
+    RESUME_FLAG="--resume"
+fi
 
 # ── train ─────────────────────────────────────────────────────────────────────
 uv run python apps/train/train_main.py \
-    --checkpoint-dir      checkpoints \
-    --num-epochs          50 \
-    --lr                  1e-4 \
-    --weight-decay        1e-4 \
-    --grad-clip           1.0 \
-    --batch-size          256 \
-    --num-workers         4 \
-    --max-seq-length      64 \
-    --hf-dataset-name     conceptual_captions \
-    --hf-dataset-split    train \
-    --val-hf-dataset-split validation \
-    --embed-dim           256 \
+    --checkpoint-dir       checkpoints \
+    --num-epochs           100 \
+    --lr                   1e-4 \
+    --weight-decay         1e-4 \
+    --grad-clip            1.0 \
+    --batch-size           256 \
+    --num-workers          4 \
+    --max-seq-length       64 \
+    --hf-dataset-name      pixparse/cc3m-wds \
+    --hf-dataset-split     train \
+    --val-hf-dataset-name  pixparse/cc3m-wds \
+    --val-hf-dataset-split train \
+    --image-field          jpg \
+    --caption-field        txt \
+    --embed-dim            256 \
     --predictor-hidden-dim 512 \
-    --predictor-n-layers  2 \
-    --sigreg-n-directions 128 \
-    --jepa-reg-weight     1.0
+    --predictor-n-layers   2 \
+    --sigreg-n-directions  128 \
+    --jepa-reg-weight      1.0 \
+    $RESUME_FLAG
