@@ -28,8 +28,9 @@ from PIL import Image
 
 _SHARD_SIZE = 5_000  # images per tar shard
 _RESIZE_PX = 256  # resize shorter edge; image processor crops to 224
-_TIMEOUT_S = 8  # per-image HTTP timeout
+_TIMEOUT_S = 3  # per-image HTTP timeout — most dead URLs fail in <100 ms
 _JPEG_QUALITY = 85
+_DEFAULT_WORKERS = 64  # HTTP is I/O-bound; more threads than cores is fine
 
 
 def _fetch(args: tuple[int, str, str]) -> tuple[int, str | None, bytes | None]:
@@ -134,7 +135,7 @@ def _process_split(split: str, output_dir: Path, max_workers: int) -> None:
 
 def main() -> None:
     """Entry point: parse arguments and prepare all splits."""
-    default_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", 8))
+    default_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", _DEFAULT_WORKERS))
 
     parser = argparse.ArgumentParser(
         description="Download CC3M and pack into WebDataset shards.",

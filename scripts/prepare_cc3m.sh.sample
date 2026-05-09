@@ -14,8 +14,8 @@
 #SBATCH --job-name=prepare_cc3m
 #SBATCH --partition=general
 #SBATCH --qos=general
-#SBATCH --cpus-per-task=16
-#SBATCH --time=06:00:00
+#SBATCH --cpus-per-task=64
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
