@@ -1,6 +1,7 @@
 """Driver file for training."""
 
 import argparse
+import contextlib
 import datetime
 import json
 import logging
@@ -476,61 +477,32 @@ def _forward_loss(
     }
 
 
-def train_step(
-    model: models.MoLeJEPA,
-    loss_fn: torch.nn.Module,
-    batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    grad_clip: float,
-) -> dict[str, float]:
-    """Run a single forward/backward pass and return the loss components.
-
-    Args:
-        model: The MoLeJEPA model.
-        loss_fn: Either a :class:`~mole_jepa.losses.JEPALoss` or
-            :class:`~mole_jepa.losses.InfoNCELoss` module.
-        batch: ``(pixel_values, input_ids, attention_mask)`` tensors.
-        optimizer: The optimiser to step.
-        device: Device on which tensors live.
-        grad_clip: Max gradient norm (0 disables clipping).
-
-    Returns:
-        Dict mapping component name to scalar float (e.g. ``"loss"``,
-        ``"loss_mse"``, ``"loss_reg_image"``, ``"loss_reg_text"``).
-    """
-    optimizer.zero_grad()
-    loss, components = _forward_batch(model, loss_fn, batch, device)
-    loss.backward()
-    if grad_clip > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    optimizer.step()
-
-    return components
-
-
-def train_epoch(
+def run_epoch(
     model: models.MoLeJEPA,
     loss_fn: torch.nn.Module,
     loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
-    optimizer: torch.optim.Optimizer,
     device: torch.device,
     epoch: int,
-    grad_clip: float,
+    *,
+    train: bool,
+    optimizer: torch.optim.Optimizer | None = None,
+    grad_clip: float = 0.0,
     log_interval: int = 100,
     max_batches: int | None = None,
 ) -> tuple[dict[str, float], int]:
-    """Train for one full pass over the dataloader.
+    """Run one epoch of training or evaluation.
 
     Args:
         model: The MoLeJEPA model.
         loss_fn: Loss module.
-        loader: DataLoader yielding training batches.
-        optimizer: The optimiser to use.
+        loader: DataLoader yielding batches.
         device: Device on which to run the forward pass.
         epoch: Current epoch number (for logging).
-        grad_clip: Max gradient norm passed to :func:`train_step`.
-        log_interval: Print a progress line every this many steps.
+        train: If ``True``, run in training mode (gradient updates enabled).
+            If ``False``, run in eval mode under :func:`torch.no_grad`.
+        optimizer: Required when ``train=True``; ignored otherwise.
+        grad_clip: Max gradient norm (0 disables clipping). Training only.
+        log_interval: Print a per-step line every this many steps. Training only.
         max_batches: Stop after this many batches. ``None`` means no limit.
 
     Returns:
@@ -538,70 +510,38 @@ def train_epoch(
         maps component name (e.g. ``"loss"``, ``"loss_mse"``) to its epoch
         average.
     """
-    model.train()
+    model.train(train)
     totals: dict[str, float] = {}
     n_batches = 0
 
-    for batch_idx, batch in enumerate(loader):
-        if max_batches is not None and batch_idx >= max_batches:
-            break
-        components = train_step(model, loss_fn, batch, optimizer, device, grad_clip)
-        for k, v in components.items():
-            totals[k] = totals.get(k, 0.0) + v
-        n_batches += 1
-
-        if (batch_idx + 1) % log_interval == 0:
-            parts = "  ".join(f"{k} {v:.4f}" for k, v in components.items())
-            print(f"epoch {epoch:>3}  step {batch_idx + 1:>6}  {parts}")
-
-    avgs = {k: v / max(n_batches, 1) for k, v in totals.items()}
-    parts = "  ".join(f"{k} {v:.4f}" for k, v in avgs.items())
-    print(f"epoch {epoch:>3}  train  {parts}  batches {n_batches}")
-    return avgs, n_batches
-
-
-def eval_epoch(
-    model: models.MoLeJEPA,
-    loss_fn: torch.nn.Module,
-    loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
-    device: torch.device,
-    epoch: int,
-    max_batches: int | None = None,
-) -> tuple[dict[str, float], int]:
-    """Evaluate the model over the validation dataloader.
-
-    Runs in :func:`torch.no_grad` with the model in eval mode.
-
-    Args:
-        model: The MoLeJEPA model.
-        loss_fn: Loss module.
-        loader: DataLoader yielding validation batches.
-        device: Device on which to run the forward pass.
-        epoch: Current epoch number (for logging).
-        max_batches: Stop after this many batches. ``None`` means no limit.
-
-    Returns:
-        Tuple of ``(avg_components, n_batches)`` where ``avg_components``
-        maps component name (e.g. ``"loss"``, ``"loss_mse"``) to its epoch
-        average.
-    """
-    model.eval()
-    totals: dict[str, float] = {}
-    n_batches = 0
-
-    with torch.no_grad():
+    ctx = contextlib.nullcontext() if train else torch.no_grad()
+    with ctx:
         for batch_idx, batch in enumerate(loader):
             if max_batches is not None and batch_idx >= max_batches:
                 break
-            _, components = _forward_batch(model, loss_fn, batch, device)
+
+            loss, components = _forward_batch(model, loss_fn, batch, device)
+
+            if train:
+                assert optimizer is not None
+                optimizer.zero_grad()
+                loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+
             for k, v in components.items():
                 totals[k] = totals.get(k, 0.0) + v
             n_batches += 1
 
-    model.train()
+            if train and (batch_idx + 1) % log_interval == 0:
+                parts = "  ".join(f"{k} {v:.4f}" for k, v in components.items())
+                print(f"epoch {epoch:>3}  step {batch_idx + 1:>6}  {parts}")
+
+    label = "train" if train else "val  "
     avgs = {k: v / max(n_batches, 1) for k, v in totals.items()}
     parts = "  ".join(f"{k} {v:.4f}" for k, v in avgs.items())
-    print(f"epoch {epoch:>3}  val    {parts}  batches {n_batches}")
+    print(f"epoch {epoch:>3}  {label}  {parts}  batches {n_batches}")
     return avgs, n_batches
 
 
@@ -680,24 +620,26 @@ def main() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         current_epoch = epoch
 
-        train_stats, train_batches = train_epoch(
+        train_stats, train_batches = run_epoch(
             model,
             loss_fn,
             loader,
-            optimizer,
             device,
-            epoch=epoch,
+            epoch,
+            train=True,
+            optimizer=optimizer,
             grad_clip=args.grad_clip,
             max_batches=args.max_batches,
         )
 
         if (epoch + 1) % 5 == 0:
-            val_stats, val_batches = eval_epoch(
+            val_stats, val_batches = run_epoch(
                 model,
                 loss_fn,
                 val_loader,
                 device,
                 epoch,
+                train=False,
                 max_batches=args.max_batches,
             )
             log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
