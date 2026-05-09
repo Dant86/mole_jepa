@@ -581,6 +581,11 @@ def main() -> None:
 
     signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
 
+    # ── stats file ────────────────────────────────────────────────────────────
+    # Truncate on a fresh run; on resume, keep history and continue appending.
+    if not args.resume:
+        (loc / _STATS_FILE).unlink(missing_ok=True)
+
     # ── data ──────────────────────────────────────────────────────────────────
     loader = build_loader(
         args.hf_dataset_name, args.hf_dataset_split, data_config, device
