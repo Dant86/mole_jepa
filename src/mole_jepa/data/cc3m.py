@@ -1,7 +1,6 @@
 """CC3M streaming dataset."""
 
 import collections.abc
-import logging
 
 import datasets as hf_datasets
 import torch
@@ -9,8 +8,6 @@ import torch.utils.data
 
 from mole_jepa import config as config_module
 from mole_jepa.data import transforms
-
-_log = logging.getLogger(__name__)
 
 
 class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
@@ -66,12 +63,9 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
             self._config.tokenizer_model_name, self._config.max_seq_length
         )
         for example in self._dataset:
-            try:
-                pixel_values = image_transform(example["image"])
-                input_ids, attention_mask = tokenize(example["caption"])
-                yield pixel_values, input_ids, attention_mask
-            except Exception:
-                _log.debug("Skipping malformed example.", exc_info=True)
+            pixel_values = image_transform(example["image"])
+            input_ids, attention_mask = tokenize(example["caption"])
+            yield pixel_values, input_ids, attention_mask
 
     @staticmethod
     def worker_init_fn(worker_id: int) -> None:  # noqa: ARG004

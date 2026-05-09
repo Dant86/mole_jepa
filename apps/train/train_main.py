@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import signal
@@ -363,7 +364,9 @@ def log_stats(
     model_loc: pathlib.Path,
     epoch: int,
     train_loss: float,
+    train_batches: int,
     val_loss: float,
+    val_batches: int,
 ) -> None:
     """Append one stats record to ``stats.jsonl`` inside ``model_loc``.
 
@@ -374,12 +377,16 @@ def log_stats(
         model_loc: Directory in which to write the stats file.
         epoch: Completed epoch number (0-indexed).
         train_loss: Average training loss for this epoch.
+        train_batches: Number of training batches processed this epoch.
         val_loss: Average validation loss for this epoch.
+        val_batches: Number of validation batches processed this epoch.
     """
     record = {
         "epoch": epoch,
-        "train_loss": round(train_loss, 6),
-        "val_loss": round(val_loss, 6),
+        "train_loss": train_loss,
+        "train_batches": train_batches,
+        "val_loss": val_loss,
+        "val_batches": val_batches,
         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     os.makedirs(model_loc, exist_ok=True)
@@ -453,7 +460,7 @@ def train_epoch(
     epoch: int,
     grad_clip: float,
     log_interval: int = 100,
-) -> float:
+) -> tuple[float, int]:
     """Train for one full pass over the dataloader.
 
     Args:
@@ -467,7 +474,7 @@ def train_epoch(
         log_interval: Print a progress line every this many steps.
 
     Returns:
-        Average loss over all batches in this epoch.
+        Tuple of ``(avg_loss, n_batches)`` for the epoch.
     """
     model.train()
     total_loss = 0.0
@@ -482,8 +489,8 @@ def train_epoch(
             print(f"epoch {epoch:>3}  step {batch_idx + 1:>6}  loss {step_loss:.4f}")
 
     avg_loss = total_loss / max(n_batches, 1)
-    print(f"epoch {epoch:>3}  avg_loss {avg_loss:.4f}")
-    return avg_loss
+    print(f"epoch {epoch:>3}  avg_loss {avg_loss:.4f}  batches {n_batches}")
+    return avg_loss, n_batches
 
 
 def eval_epoch(
@@ -492,7 +499,7 @@ def eval_epoch(
     loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
     device: torch.device,
     epoch: int,
-) -> float:
+) -> tuple[float, int]:
     """Evaluate the model over the validation dataloader.
 
     Runs in :func:`torch.no_grad` with the model in eval mode.
@@ -505,7 +512,7 @@ def eval_epoch(
         epoch: Current epoch number (for logging).
 
     Returns:
-        Average validation loss over all batches.
+        Tuple of ``(avg_val_loss, n_batches)`` for the epoch.
     """
     model.eval()
     total_loss = 0.0
@@ -525,12 +532,17 @@ def eval_epoch(
 
     model.train()
     avg_val_loss = total_loss / max(n_batches, 1)
-    print(f"epoch {epoch:>3}  val_loss  {avg_val_loss:.4f}")
-    return avg_val_loss
+    print(f"epoch {epoch:>3}  val_loss  {avg_val_loss:.4f}  batches {n_batches}")
+    return avg_val_loss, n_batches
 
 
 def main() -> None:
     """Main script body."""
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     args = parse_args()
     device = _get_device()
     print(f"device: {device}")
@@ -584,7 +596,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         current_epoch = epoch
 
-        train_loss = train_epoch(
+        train_loss, train_batches = train_epoch(
             model,
             loss_fn,
             loader,
@@ -595,8 +607,10 @@ def main() -> None:
         )
 
         if (epoch + 1) % 5 == 0:
-            val_loss = eval_epoch(model, loss_fn, val_loader, device, epoch)
-            log_stats(loc, epoch, train_loss, val_loss)
+            val_loss, val_batches = eval_epoch(
+                model, loss_fn, val_loader, device, epoch
+            )
+            log_stats(loc, epoch, train_loss, train_batches, val_loss, val_batches)
 
     # Training completed successfully.
     # Save the final model weights, then remove the partial checkpoint — it was
