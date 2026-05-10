@@ -21,7 +21,7 @@
 #SBATCH --error=/dev/null
 
 # ── environment ───────────────────────────────────────────────────────────────
-set -euo pipefail
+set -uo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
@@ -49,8 +49,12 @@ mkdir -p "${CHECKPOINT_DIR}"
 uv sync
 
 # ── train ─────────────────────────────────────────────────────────────────────
-# Resume is auto-detected inside train_main.py based on the config hash —
-# no need to pass a flag here.
+# Run Python in the background so we can trap SIGUSR1 here in bash and forward
+# it to the Python process. Without this, --signal=B:USR1@300 delivers SIGUSR1
+# to the batch script (this shell), not to the Python child — so the Python
+# signal handler would never fire.
+#
+# Resume is auto-detected inside train_main.py based on the config hash.
 uv run python apps/train/train_main.py \
     --checkpoint-dir       "${CHECKPOINT_DIR}" \
     --num-epochs           100 \
@@ -69,4 +73,11 @@ uv run python apps/train/train_main.py \
     --embed-dim            256 \
     --predictor-hidden-dim 512 \
     --predictor-n-layers   2 \
-    --sigreg-n-directions  128
+    --sigreg-n-directions  128 &
+PY_PID=$!
+
+# Forward SIGUSR1 to the Python process so it can checkpoint and exit 99.
+trap "kill -USR1 ${PY_PID}" USR1
+
+# Wait for Python to finish; propagate its exit code (99 = requeue).
+wait "${PY_PID}"

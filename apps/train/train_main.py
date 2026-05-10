@@ -310,9 +310,9 @@ def save_checkpoint(
 ) -> None:
     """Save model and optimiser state to a single checkpoint file.
 
-    Always writes to ``checkpoint.pt`` inside ``model_loc``, overwriting any
-    previous checkpoint. The completed epoch is stored inside the file so it
-    can be recovered without relying on the filename.
+    Writes atomically: saves to ``checkpoint.pt.tmp`` first, then renames it
+    into place. This ensures a ``SIGKILL`` arriving mid-write cannot leave a
+    corrupt checkpoint behind.
 
     Args:
         model: The model whose weights to persist.
@@ -321,14 +321,16 @@ def save_checkpoint(
         model_loc: Directory in which to write the checkpoint.
     """
     os.makedirs(model_loc, exist_ok=True)
+    tmp = model_loc / (_CHECKPOINT_FILE + ".tmp")
     torch.save(
         {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
         },
-        model_loc / _CHECKPOINT_FILE,
+        tmp,
     )
+    os.replace(tmp, model_loc / _CHECKPOINT_FILE)
 
 
 def load_checkpoint(
@@ -589,14 +591,15 @@ def main() -> None:
         print(f"Starting fresh run ({loc})")
 
     # ── preemption handler ────────────────────────────────────────────────────
-    # SIGUSR1 is sent by SLURM five minutes before the wall-time limit.
-    # Save a checkpoint so the job can be requeued automatically.
+    # On the DSI cluster, preemption sends SIGUSR1 with a 5-minute grace period
+    # (configured via --signal=B:USR1@300), then SIGKILL. Exiting with code 99
+    # tells Slurm to requeue the job automatically (--requeue).
     current_epoch = start_epoch
 
     def _checkpoint_and_exit(*_: object) -> None:
-        print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch} and exiting.")
+        print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
         save_checkpoint(model, optimizer, current_epoch, loc)
-        sys.exit(0)
+        sys.exit(99)
 
     signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
 
@@ -643,6 +646,7 @@ def main() -> None:
                 max_batches=args.max_batches,
             )
             log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
+            save_checkpoint(model, optimizer, epoch, loc)
 
     # Training completed successfully.
     # Save the final model weights, then remove the partial checkpoint — it was
