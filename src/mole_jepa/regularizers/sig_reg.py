@@ -23,6 +23,11 @@ class SIGReg[TestT: nn.Module](nn.Module):
             :class:`~mole_jepa.test_statistics.EppsPulley` subclasses satisfy
             this contract.
         n_directions: Number of random projection directions M.
+        demean: If ``True``, subtract the batch mean from ``x`` before
+            projecting. This removes the implicit zero-mean constraint of the
+            isotropic Gaussian target, allowing each modality to sit at its
+            own offset in the embedding space (preserving the "modality gap")
+            while still enforcing isotropic covariance structure.
 
     Notes:
         Definition from Balestriero & LeCun, "LeJEPA" (2025), Definition 2.
@@ -32,10 +37,12 @@ class SIGReg[TestT: nn.Module](nn.Module):
         self,
         test_statistic: TestT,
         n_directions: int = 128,
+        demean: bool = False,
     ) -> None:
         super().__init__()
         self.test_statistic = test_statistic
         self.n_directions = n_directions
+        self.demean = demean
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Compute the SIGReg loss for a batch of embeddings.
@@ -48,6 +55,9 @@ class SIGReg[TestT: nn.Module](nn.Module):
             Scalar regularization loss.
         """
         _, d = x.shape
+
+        if self.demean:
+            x = x - x.mean(dim=0, keepdim=True)
 
         # Sample M random unit vectors on S^{d-1}: (M, d)
         directions = torch.randn(self.n_directions, d, device=x.device, dtype=x.dtype)

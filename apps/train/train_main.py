@@ -190,6 +190,15 @@ def parse_args() -> argparse.Namespace:
         help="Number of random projection directions used by SIGReg.",
     )
     parser.add_argument(
+        "--sigreg-demean",
+        action="store_true",
+        default=mcfg.sigreg_demean,
+        help=(
+            "Subtract the batch mean before applying SIGReg, removing the "
+            "zero-mean constraint so each modality can keep its own offset."
+        ),
+    )
+    parser.add_argument(
         "--jepa-lam",
         type=float,
         default=mcfg.jepa_lam,
@@ -236,6 +245,7 @@ def construct_model_config(args: argparse.Namespace) -> config_module.ModelConfi
         contrastive=args.use_contrastive_loss,
         sigreg_dist=args.sigreg_dist,
         sigreg_n_directions=args.sigreg_n_directions,
+        sigreg_demean=args.sigreg_demean,
         jepa_lam=args.jepa_lam,
         jepa_regularize_z_t=args.jepa_regularize_z_t,
         info_nce_temperature=args.info_nce_temperature,

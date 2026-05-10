@@ -23,6 +23,9 @@ class ModelConfig:
             otherwise use :class:`~mole_jepa.losses.JEPALoss` with SIGReg.
         sigreg_dist: Target distribution for the Epps-Pulley statistic.
         sigreg_n_directions: Number of random projection directions in SIGReg.
+        sigreg_demean: If ``True``, subtract the batch mean before applying
+            SIGReg, removing the zero-mean constraint so each modality can
+            maintain its own offset in the embedding space.
         jepa_lam: Regularization weight λ for JEPALoss. The MSE weight is
             ``1 - jepa_lam``. Default 0.05 per the LeJEPA paper.
         jepa_regularize_z_t: If ``True`` (default), apply SIGReg to both
@@ -39,6 +42,7 @@ class ModelConfig:
     contrastive: bool = False
     sigreg_dist: Literal["gaussian", "laplace"] = "gaussian"
     sigreg_n_directions: int = 128
+    sigreg_demean: bool = False
     jepa_lam: float = 0.05
     jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07

@@ -40,6 +40,7 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
             regularizer=regularizers.SIGReg(
                 test_statistic=test_statistics.epps_pulley(config.sigreg_dist),
                 n_directions=config.sigreg_n_directions,
+                demean=config.sigreg_demean,
             ),
             lam=config.jepa_lam,
             regularize_z_t=config.jepa_regularize_z_t,
