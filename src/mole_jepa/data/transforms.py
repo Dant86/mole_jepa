@@ -6,6 +6,8 @@ import PIL.Image
 import torch
 import transformers
 
+from mole_jepa import config as config_module
+
 
 def build_image_transform(
     model_name: str,
@@ -61,3 +63,37 @@ def build_tokenizer(
         return enc["input_ids"].squeeze(0), enc["attention_mask"].squeeze(0)
 
     return tokenize
+
+
+def preprocess(
+    image: PIL.Image.Image,
+    caption: str,
+    config: config_module.DataConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Preprocess a single image-caption pair into model-ready tensors.
+
+    Convenience wrapper around :func:`build_image_transform` and
+    :func:`build_tokenizer`. Intended for interactive use in notebooks where
+    you want to run the model on one or a few samples without constructing a
+    full :class:`~mole_jepa.data.CC3MDataset`.
+
+    Each call rebuilds the processor and tokenizer from HuggingFace, so cache
+    the result or use a :class:`~mole_jepa.data.CC3MDataset` for bulk work.
+
+    Args:
+        image: A PIL image (any mode; converted to RGB internally).
+        caption: Caption string to tokenize.
+        config: Data config supplying processor/tokenizer names and
+            ``max_seq_length``.
+
+    Returns:
+        ``(pixel_values, input_ids, attention_mask)`` — each a 1-D or 3-D
+        tensor with a leading batch dimension of 1, ready to pass directly
+        to :class:`~mole_jepa.models.MoLeJEPA`.
+    """
+    image_transform = build_image_transform(config.image_processor_model_name)
+    tokenize = build_tokenizer(config.tokenizer_model_name, config.max_seq_length)
+
+    pixel_values = image_transform(image.convert("RGB")).unsqueeze(0)
+    input_ids, attention_mask = tokenize(caption)
+    return pixel_values, input_ids.unsqueeze(0), attention_mask.unsqueeze(0)
