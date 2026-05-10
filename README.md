@@ -11,20 +11,21 @@ regularized with SIGReg to prevent representational collapse.
 
 ## Architecture
 
-Image encoder `f` (ViT) and text encoder `h` (LM) both project to a shared
-embedding space `ℝᵈ`. A lightweight MLP predictor `g` is trained to predict
-`h(y)` from `f(x)` for paired image-text inputs `(x, y)`.
+<div align="center">
+  <img src="assets/arch.png" width="720" alt="MoLeJEPA architecture diagram">
+</div>
+
+Image encoder $f$ (ViT) and text encoder $h$ (LM) both project to a shared
+embedding space $\mathbb{R}^d$. A lightweight MLP predictor $g$ is trained to
+predict $h(y)$ from $f(x)$ for paired image-text inputs $(x, y)$.
 
 The model and loss are intentionally decoupled. `MoLeJEPA.forward` returns the
-raw embeddings `(f(x), g(f(x)), h(y))`; a separate loss module is composed on
-top. The default training objective follows LeJEPA (eq. 4), trading off
-reconstruction against regularization with a single scalar λ:
+raw embeddings $(f(x),\, g(f(x)),\, h(y))$; a separate loss module is composed
+on top. The default training objective follows LeJEPA (eq. 4):
 
-```
-L = λ · (SIGReg(f(x)) + SIGReg(h(y)))  +  (1 - λ) · MSE(g(f(x)), h(y))
-```
+$$L = \lambda \cdot \bigl(\mathrm{SIGReg}(f(x)) + \mathrm{SIGReg}(h(y))\bigr) + (1 - \lambda) \cdot \mathrm{MSE}\bigl(g(f(x)),\, h(y)\bigr)$$
 
-The default λ = 0.05 (per the LeJEPA paper), keeping MSE as the dominant
+The default $\lambda = 0.05$ (per the LeJEPA paper) keeps MSE as the dominant
 signal while a small regularization term prevents representational collapse.
 An InfoNCE contrastive loss is also provided as an alternative.
 
