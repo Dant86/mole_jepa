@@ -42,6 +42,7 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
                 n_directions=config.sigreg_n_directions,
             ),
             lam=config.jepa_lam,
+            regularize_z_t=config.jepa_regularize_z_t,
         )
 
     return model, loss

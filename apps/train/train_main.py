@@ -199,6 +199,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-regularize-zt",
+        dest="jepa_regularize_z_t",
+        action="store_false",
+        help=(
+            "Disable SIGReg on text embeddings z_t. Only regularizes the "
+            "image encoder; the text encoder acts as an unregularized target."
+        ),
+    )
+    parser.set_defaults(jepa_regularize_z_t=mcfg.jepa_regularize_z_t)
+    parser.add_argument(
         "--info-nce-temperature",
         type=float,
         default=mcfg.info_nce_temperature,
@@ -227,6 +237,7 @@ def construct_model_config(args: argparse.Namespace) -> config_module.ModelConfi
         sigreg_dist=args.sigreg_dist,
         sigreg_n_directions=args.sigreg_n_directions,
         jepa_lam=args.jepa_lam,
+        jepa_regularize_z_t=args.jepa_regularize_z_t,
         info_nce_temperature=args.info_nce_temperature,
     )
 

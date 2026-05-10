@@ -73,7 +73,8 @@ uv run python apps/train/train_main.py \
     --embed-dim            256 \
     --predictor-hidden-dim 512 \
     --predictor-n-layers   2 \
-    --sigreg-n-directions  128 &
+    --sigreg-n-directions  128 \
+    "$@" &
 PY_PID=$!
 
 # Forward SIGUSR1 to the Python process so it can checkpoint and exit 99.

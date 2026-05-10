@@ -25,6 +25,9 @@ class ModelConfig:
         sigreg_n_directions: Number of random projection directions in SIGReg.
         jepa_lam: Regularization weight λ for JEPALoss. The MSE weight is
             ``1 - jepa_lam``. Default 0.05 per the LeJEPA paper.
+        jepa_regularize_z_t: If ``True`` (default), apply SIGReg to both
+            image and text embeddings. If ``False``, only regularize the image
+            embeddings; the text encoder acts as an unregularized target.
         info_nce_temperature: Softmax temperature for InfoNCELoss.
     """
 
@@ -37,6 +40,7 @@ class ModelConfig:
     sigreg_dist: Literal["gaussian", "laplace"] = "gaussian"
     sigreg_n_directions: int = 128
     jepa_lam: float = 0.05
+    jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07
 
     def serialize(self) -> str:
