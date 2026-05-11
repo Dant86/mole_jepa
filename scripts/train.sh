@@ -21,7 +21,7 @@
 #SBATCH --error=/dev/null
 
 # ── environment ───────────────────────────────────────────────────────────────
-set -uo pipefail
+set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
@@ -51,11 +51,39 @@ uv sync
 # ── train ─────────────────────────────────────────────────────────────────────
 # Run Python in the background so we can trap SIGUSR1 here in bash and forward
 # it to the Python process. Without this, --signal=B:USR1@300 delivers SIGUSR1
-# to the batch script (this shell), not to the Python child — so the Python
-# signal handler would never fire.
+# to the batch script (this shell), not to the Python child.
+#
+# setsid launches Python as its own session/process-group leader so that
+# `kill -- -$PY_PID` can signal the whole group if needed (e.g. if train_main
+# ever spawns workers). The PID and PGID are identical for a setsid child.
 #
 # Resume is auto-detected inside train_main.py based on the config hash.
-uv run python apps/train/train_main.py \
+PY_PID=""
+
+on_preempt() {
+    echo "[$(date)] USR1 received: checkpointing before preemption."
+    if [[ -n "${PY_PID}" ]] && kill -0 "${PY_PID}" 2>/dev/null; then
+        kill -s USR1 -- "-${PY_PID}" 2>/dev/null || kill -USR1 "${PY_PID}" 2>/dev/null || true
+    fi
+    # Wait for Python to finish saving the checkpoint before we exit.
+    wait "${PY_PID}" || true
+    echo "[$(date)] Exiting with code 99 for Slurm requeue."
+    exit 99
+}
+
+on_term() {
+    echo "[$(date)] TERM received: terminating without requeue."
+    if [[ -n "${PY_PID}" ]] && kill -0 "${PY_PID}" 2>/dev/null; then
+        kill -s TERM -- "-${PY_PID}" 2>/dev/null || kill -TERM "${PY_PID}" 2>/dev/null || true
+    fi
+    wait "${PY_PID}" || true
+    exit 143
+}
+
+trap on_preempt USR1
+trap on_term TERM
+
+setsid uv run python apps/train/train_main.py \
     --checkpoint-dir       "${CHECKPOINT_DIR}" \
     --num-epochs           100 \
     --lr                   1e-4 \
@@ -77,8 +105,12 @@ uv run python apps/train/train_main.py \
     "$@" &
 PY_PID=$!
 
-# Forward SIGUSR1 to the Python process so it can checkpoint and exit 99.
-trap "kill -USR1 ${PY_PID}" USR1
+# Wait for Python; propagate its exit code (99 = explicit requeue request).
+return_code=0
+wait "${PY_PID}" || return_code=$?
 
-# Wait for Python to finish; propagate its exit code (99 = requeue).
-wait "${PY_PID}"
+if [[ "${return_code}" -eq 99 ]]; then
+    echo "[$(date)] Training requested requeue via exit 99."
+    exit 99
+fi
+exit "${return_code}"
