@@ -17,10 +17,8 @@ import torch.utils.data
 
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
-from mole_jepa import factory, losses, models
+from mole_jepa import factory, losses, model_io, models
 
-_CHECKPOINT_FILE = "checkpoint.pt"
-_FINAL_MODEL_FILE = "model.pt"
 _STATS_FILE = "stats.jsonl"
 
 
@@ -308,101 +306,6 @@ def build_loader(
     )
 
 
-def model_location(
-    checkpoint_dir: str, config: config_module.ModelConfig
-) -> pathlib.Path:
-    """Construct the model checkpoint location.
-
-    Args:
-        checkpoint_dir: Directory in which all checkpoints are stored.
-        config: A :class:`ModelConfig` instance.
-
-    Returns:
-        A :class:`Path` in which to save all checkpoint files for this model.
-    """
-    return pathlib.Path(checkpoint_dir) / config.serialize()
-
-
-def save_checkpoint(
-    model: models.MoLeJEPA,
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-    model_loc: pathlib.Path,
-) -> None:
-    """Save model and optimiser state to a single checkpoint file.
-
-    Writes atomically: saves to ``checkpoint.pt.tmp`` first, then renames it
-    into place. This ensures a ``SIGKILL`` arriving mid-write cannot leave a
-    corrupt checkpoint behind.
-
-    Args:
-        model: The model whose weights to persist.
-        optimizer: The optimiser whose state to persist.
-        epoch: Most recently completed epoch (0-indexed).
-        model_loc: Directory in which to write the checkpoint.
-    """
-    os.makedirs(model_loc, exist_ok=True)
-    tmp = model_loc / (_CHECKPOINT_FILE + ".tmp")
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        },
-        tmp,
-    )
-    os.replace(tmp, model_loc / _CHECKPOINT_FILE)
-
-
-def load_checkpoint(
-    model_loc: pathlib.Path,
-) -> tuple[dict[str, Any], dict[str, Any] | None, int]:
-    """Load the checkpoint from ``model_loc``.
-
-    Args:
-        model_loc: Directory containing ``checkpoint.pt``.
-
-    Returns:
-        A ``(model_state_dict, optimizer_state_dict, epoch)`` triple.
-        ``optimizer_state_dict`` is ``None`` if the checkpoint predates
-        optimizer state persistence.
-    """
-    checkpoint = torch.load(
-        model_loc / _CHECKPOINT_FILE,
-        weights_only=True,
-    )
-    return (
-        checkpoint["model_state_dict"],
-        checkpoint.get("optimizer_state_dict"),
-        checkpoint["epoch"],
-    )
-
-
-def save_final_model(
-    model: models.MoLeJEPA,
-    epoch: int,
-    model_loc: pathlib.Path,
-) -> None:
-    """Save the final model weights after a completed training run.
-
-    Writes only the model state dict (no optimiser state) to ``model.pt``
-    inside ``model_loc``. The optimiser is not needed after training ends.
-
-    Args:
-        model: The fully trained model.
-        epoch: Last completed epoch (0-indexed).
-        model_loc: Directory in which to write the file.
-    """
-    os.makedirs(model_loc, exist_ok=True)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-        },
-        model_loc / _FINAL_MODEL_FILE,
-    )
-
-
 def log_stats(
     model_loc: pathlib.Path,
     epoch: int,
@@ -582,7 +485,7 @@ def main() -> None:
     model_config = construct_model_config(args)
     data_config = construct_data_config(args, model_config)
 
-    loc = model_location(args.checkpoint_dir, model_config)
+    loc = model_io.model_dir(args.checkpoint_dir, model_config)
     model, loss_fn = factory.build(model_config)
     model = model.to(device)
     loss_fn = loss_fn.to(device)
@@ -594,20 +497,21 @@ def main() -> None:
     )
 
     # ── resume detection ──────────────────────────────────────────────────────
-    # Auto-resume if and only if a checkpoint for this exact config hash
-    # exists. A different config (e.g. after a hyperparameter change) produces
-    # a different hash → different loc → no checkpoint found → fresh run.
-    checkpoint_file = loc / _CHECKPOINT_FILE
-    resuming = checkpoint_file.exists()
+    # Auto-resume if a train state for this exact config hash exists.
+    # A changed hyperparameter → different hash → fresh run automatically.
+    resuming = model_io.has_train_state(model_config, args.checkpoint_dir)
 
     start_epoch = 0
     if resuming:
-        model_state, opt_state, start_epoch = load_checkpoint(loc)
-        model.load_state_dict(model_state)
-        if opt_state is not None:
-            optimizer.load_state_dict(opt_state)
-        start_epoch += 1  # resume from the next epoch
-        print(f"Resuming from checkpoint at epoch {start_epoch} ({loc})")
+        model_io.load_model_weights(
+            model, model_config, args.checkpoint_dir, map_location=device
+        )
+        train_state = model_io.load_train_state(model_config, args.checkpoint_dir)
+        assert train_state is not None
+        opt_state_dict, last_epoch = train_state
+        optimizer.load_state_dict(opt_state_dict)
+        start_epoch = last_epoch + 1
+        print(f"Resuming from epoch {start_epoch} ({loc})")
     else:
         print(f"Starting fresh run ({loc})")
 
@@ -619,7 +523,10 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        save_checkpoint(model, optimizer, current_epoch, loc)
+        model_io.save_model(model, model_config, args.checkpoint_dir)
+        model_io.save_train_state(
+            optimizer, current_epoch, model_config, args.checkpoint_dir
+        )
         sys.exit(99)
 
     signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
@@ -667,14 +574,16 @@ def main() -> None:
                 max_batches=args.max_batches,
             )
             log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
-            save_checkpoint(model, optimizer, epoch, loc)
+            model_io.save_model(model, model_config, args.checkpoint_dir)
+            model_io.save_train_state(
+                optimizer, epoch, model_config, args.checkpoint_dir
+            )
 
     # Training completed successfully.
-    # Save the final model weights, then remove the partial checkpoint — it was
-    # only needed for resumption and is no longer useful.
-    final_epoch = args.num_epochs - 1
-    save_final_model(model, final_epoch, loc)
-    (loc / _CHECKPOINT_FILE).unlink(missing_ok=True)
+    # Save the final model weights, then remove the ephemeral train state —
+    # it is only needed for resumption and is no longer useful.
+    model_io.save_model(model, model_config, args.checkpoint_dir)
+    model_io.cleanup_train_state(model_config, args.checkpoint_dir)
 
 
 if __name__ == "__main__":
