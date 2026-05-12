@@ -230,6 +230,13 @@ def build_loader(
         # Keep workers alive between epochs — avoids re-spawning processes and
         # re-initialising transforms / tokenizers at the start of every epoch.
         persistent_workers=(data_config.num_workers > 0),
+        # Python 3.14 changed the default multiprocessing start method on Linux
+        # from 'fork' to 'forkserver'.  Forkserver requires worker arguments to
+        # be picklable, but our dataset holds closures (the compiled torchvision
+        # transform and tokenizer wrapper) that are intentionally not picklable.
+        # The whole point of building transforms in __init__ is that fork-based
+        # workers inherit them from the parent process without serialisation.
+        multiprocessing_context="fork" if data_config.num_workers > 0 else None,
     )
 
 
