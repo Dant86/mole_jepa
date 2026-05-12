@@ -449,6 +449,15 @@ def main() -> None:
         model_io.save_train_state(
             optimizer, current_epoch, model_config, args.checkpoint_dir
         )
+        # Explicitly tear down DataLoader workers before exiting.  If we call
+        # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
+        # worker processes are orphaned and Python's multiprocessing resource
+        # tracker warns about ~21 leaked semaphores at shutdown.  Nulling the
+        # _iterator attribute triggers the iterator's __del__, which calls
+        # _shutdown_workers() and joins the worker processes cleanly.
+        for dl in (loader, val_loader):
+            if getattr(dl, "_iterator", None) is not None:
+                dl._iterator = None  # type: ignore[assignment]
         sys.exit(99)
 
     signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
