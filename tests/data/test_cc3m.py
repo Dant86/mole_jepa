@@ -1,9 +1,12 @@
 """Unit tests for CC3MDataset."""
 
 import collections.abc
+import io
 import typing
 import unittest.mock
+import urllib.error
 
+import PIL.Image
 import pytest
 import torch
 
@@ -139,3 +142,89 @@ class TestCC3MDataset:
             cc3m.CC3MDataset.worker_init_fn(worker_id=0)
 
         mock_dataset.shard.assert_not_called()
+
+    def test_url_image_is_fetched(self) -> None:
+        """When the image field is a URL string, _fetch_image is called."""
+        example = {"jpg": "http://example.com/img.jpg", "txt": "a photo"}
+        hf_dataset = unittest.mock.MagicMock()
+        hf_dataset.__iter__ = unittest.mock.Mock(return_value=iter([example]))
+
+        fake_image = PIL.Image.new("RGB", (_H, _W))
+        image_transform = unittest.mock.MagicMock(return_value=torch.randn(_C, _H, _W))
+        tokenize = unittest.mock.MagicMock(
+            return_value=(
+                torch.randint(0, 100, (_MAX_LENGTH,)),
+                torch.ones(_MAX_LENGTH, dtype=torch.long),
+            )
+        )
+        with (
+            unittest.mock.patch(
+                "mole_jepa.data.cc3m._fetch_image", return_value=fake_image
+            ) as mock_fetch,
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_image_transform",
+                return_value=image_transform,
+            ),
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_tokenizer", return_value=tokenize
+            ),
+        ):
+            dataset = cc3m.CC3MDataset(hf_dataset, _make_config())
+            items = list(dataset)
+
+        mock_fetch.assert_called_once_with("http://example.com/img.jpg")
+        assert len(items) == 1
+
+    def test_url_fetch_failure_skips_example(self) -> None:
+        """A URLError from _fetch_image causes the example to be skipped."""
+        pil_example = {"jpg": PIL.Image.new("RGB", (_H, _W)), "txt": "good"}
+        url_example = {"jpg": "http://example.com/dead.jpg", "txt": "bad"}
+        hf_dataset = unittest.mock.MagicMock()
+        hf_dataset.__iter__ = unittest.mock.Mock(
+            return_value=iter([url_example, pil_example])
+        )
+
+        image_transform = unittest.mock.MagicMock(return_value=torch.randn(_C, _H, _W))
+        tokenize = unittest.mock.MagicMock(
+            return_value=(
+                torch.randint(0, 100, (_MAX_LENGTH,)),
+                torch.ones(_MAX_LENGTH, dtype=torch.long),
+            )
+        )
+        with (
+            unittest.mock.patch(
+                "mole_jepa.data.cc3m._fetch_image",
+                side_effect=urllib.error.URLError("dead link"),
+            ),
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_image_transform",
+                return_value=image_transform,
+            ),
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_tokenizer", return_value=tokenize
+            ),
+        ):
+            dataset = cc3m.CC3MDataset(hf_dataset, _make_config())
+            items = list(dataset)
+
+        # URL example was skipped; only the PIL example is yielded.
+        assert len(items) == 1
+
+
+class TestFetchImage:
+    def test_returns_rgb_pil_image(self) -> None:
+        """_fetch_image reads bytes from a URL and returns an RGB PIL Image."""
+        buf = io.BytesIO()
+        PIL.Image.new("RGB", (8, 8), color=(10, 20, 30)).save(buf, "JPEG")
+        fake_jpeg = buf.getvalue()
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = unittest.mock.Mock(return_value=False)
+        mock_resp.read.return_value = fake_jpeg
+
+        with unittest.mock.patch("urllib.request.urlopen", return_value=mock_resp):
+            img = cc3m._fetch_image("http://example.com/img.jpg")
+
+        assert isinstance(img, PIL.Image.Image)
+        assert img.mode == "RGB"

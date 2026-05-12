@@ -86,3 +86,10 @@ class TestSIGReg:
             test_statistics.epps_pulley("gaussian"), n_directions=512
         )
         assert reg(gaussian_embeddings).shape == torch.Size([])
+
+    def test_demean_true(self, gaussian_embeddings: torch.Tensor) -> None:
+        """demean=True centres embeddings; output is still a valid loss."""
+        reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"), demean=True)
+        result = reg(gaussian_embeddings)
+        assert result.shape == torch.Size([])
+        assert result.item() >= 0.0

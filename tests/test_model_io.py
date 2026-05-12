@@ -93,6 +93,20 @@ class TestSaveLoadModel:
         loc = mio.model_dir(tmp_path, small_config)
         assert not (loc / "model.pt.tmp").exists()
 
+    def test_save_does_not_overwrite_existing_config(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        small_config: config_module.ModelConfig,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """Second save_model call must not clobber an existing config.json."""
+        model, _ = model_and_optimizer
+        mio.save_model(model, small_config, tmp_path)
+        # Spy on write_text — it must not be called on the second save.
+        with unittest.mock.patch("pathlib.Path.write_text") as mock_write:
+            mio.save_model(model, small_config, tmp_path)
+        mock_write.assert_not_called()
+
     def test_model_pt_contains_only_state_dict(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
@@ -265,6 +279,19 @@ class TestListModels:
         assert len(results) == 1
         assert results[0].config == small_config
         assert results[0].config_hash == small_config.serialize()
+
+    def test_skips_plain_files_in_root(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        small_config: config_module.ModelConfig,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """Non-directory entries in the root (e.g. stray files) are ignored."""
+        model, _ = model_and_optimizer
+        (tmp_path / "stray.txt").write_text("garbage")
+        mio.save_model(model, small_config, tmp_path)
+        results = mio.list_models(tmp_path)
+        assert len(results) == 1
 
     def test_skips_dir_missing_model_pt(
         self,

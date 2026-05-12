@@ -44,6 +44,14 @@ def mock_tokenizer() -> unittest.mock.MagicMock:
     return tokenizer
 
 
+def _patch_processor(processor: unittest.mock.MagicMock) -> unittest.mock.patch:  # type: ignore[type-arg]
+    """Patch AutoImageProcessor.from_pretrained to return *processor*."""
+    p = unittest.mock.patch("mole_jepa.data.transforms.transformers.AutoImageProcessor")
+    mock_cls = p.start()
+    mock_cls.from_pretrained.return_value = processor
+    return p
+
+
 class TestBuildImageTransform:
     def test_returns_callable(
         self, mock_image_processor: unittest.mock.MagicMock
@@ -54,6 +62,52 @@ class TestBuildImageTransform:
             mock_cls.from_pretrained.return_value = mock_image_processor
             transform = transforms.build_image_transform(_MODEL_NAME)
         assert callable(transform)
+
+    def test_shortest_edge_config(self, dummy_image: PIL.Image.Image) -> None:
+        """size={'shortest_edge': N} is resolved to an int resize target."""
+        processor = unittest.mock.MagicMock()
+        processor.size = {"shortest_edge": _H}
+        processor.crop_size = {"height": _H, "width": _W}
+        processor.image_mean = [0.5, 0.5, 0.5]
+        processor.image_std = [0.5, 0.5, 0.5]
+        with unittest.mock.patch(
+            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = processor
+            transform = transforms.build_image_transform(_MODEL_NAME)
+        assert transform(dummy_image).shape == (_C, _H, _W)
+
+    def test_no_crop_size_attr_with_tuple_resize(
+        self, dummy_image: PIL.Image.Image
+    ) -> None:
+        """crop_size absent + height/width resize → crop_to inherits resize_to tuple."""
+        processor = unittest.mock.MagicMock()
+        processor.size = {"height": _H, "width": _W}
+        processor.crop_size = None  # absent → getattr returns None
+        processor.image_mean = [0.5, 0.5, 0.5]
+        processor.image_std = [0.5, 0.5, 0.5]
+        with unittest.mock.patch(
+            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = processor
+            transform = transforms.build_image_transform(_MODEL_NAME)
+        assert transform(dummy_image).shape == (_C, _H, _W)
+
+    def test_no_crop_size_attr_with_int_resize(
+        self, dummy_image: PIL.Image.Image
+    ) -> None:
+        """crop_size absent + shortest_edge resize → crop_to is (N, N) tuple."""
+        processor = unittest.mock.MagicMock()
+        processor.size = {"shortest_edge": _H}
+        processor.crop_size = None
+        processor.image_mean = [0.5, 0.5, 0.5]
+        processor.image_std = [0.5, 0.5, 0.5]
+        with unittest.mock.patch(
+            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = processor
+            transform = transforms.build_image_transform(_MODEL_NAME)
+        assert transform(dummy_image).shape == (_C, _H, _W)
 
     def test_output_shape(
         self,
@@ -82,6 +136,38 @@ class TestBuildImageTransform:
 
         result = transform(dummy_image)
         assert isinstance(result, torch.Tensor)
+
+
+class TestPreprocess:
+    def test_output_shapes(
+        self,
+        dummy_image: PIL.Image.Image,
+    ) -> None:
+        """preprocess() returns correctly shaped tensors with a leading batch dim."""
+        fake_pixels = torch.randn(_C, _H, _W)
+        fake_ids = torch.randint(0, 100, (_MAX_LENGTH,))
+        fake_mask = torch.ones(_MAX_LENGTH, dtype=torch.long)
+
+        with (
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_image_transform",
+                return_value=lambda img: fake_pixels,
+            ),
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_tokenizer",
+                return_value=lambda text: (fake_ids, fake_mask),
+            ),
+        ):
+            from mole_jepa import config as config_module
+
+            cfg = config_module.DataConfig(max_seq_length=_MAX_LENGTH)
+            pixel_values, input_ids, attention_mask = transforms.preprocess(
+                dummy_image, "a caption", cfg
+            )
+
+        assert pixel_values.shape == (1, _C, _H, _W)
+        assert input_ids.shape == (1, _MAX_LENGTH)
+        assert attention_mask.shape == (1, _MAX_LENGTH)
 
 
 class TestBuildTokenizer:
