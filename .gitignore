@@ -1,6 +1,9 @@
 # Local environment — contains paths and secrets
 .env
 
+# Claude Code project files
+.claude/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
