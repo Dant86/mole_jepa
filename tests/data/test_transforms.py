@@ -2,6 +2,8 @@
 
 import unittest.mock
 
+import numpy as np
+import PIL.Image
 import pytest
 import torch
 
@@ -15,10 +17,21 @@ _C, _H, _W = 3, 224, 224
 @pytest.fixture
 def mock_image_processor() -> unittest.mock.MagicMock:
     processor = unittest.mock.MagicMock()
-    processor.return_value = {
-        "pixel_values": torch.randn(1, _C, _H, _W),
-    }
+    # The new torchvision-based transform reads these config attributes rather
+    # than calling the processor as a function.
+    processor.size = {"height": _H, "width": _W}
+    processor.crop_size = {"height": _H, "width": _W}
+    processor.image_mean = [0.5, 0.5, 0.5]
+    processor.image_std = [0.5, 0.5, 0.5]
     return processor
+
+
+@pytest.fixture
+def dummy_image() -> PIL.Image.Image:
+    """A small random RGB PIL image for transform testing."""
+    rng = np.random.default_rng(0)
+    arr = rng.integers(0, 256, (_H, _W, _C), dtype=np.uint8)
+    return PIL.Image.fromarray(arr, mode="RGB")
 
 
 @pytest.fixture
@@ -42,18 +55,10 @@ class TestBuildImageTransform:
             transform = transforms.build_image_transform(_MODEL_NAME)
         assert callable(transform)
 
-    def test_output_shape(self, mock_image_processor: unittest.mock.MagicMock) -> None:
-        with unittest.mock.patch(
-            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
-        ) as mock_cls:
-            mock_cls.from_pretrained.return_value = mock_image_processor
-            transform = transforms.build_image_transform(_MODEL_NAME)
-
-        result = transform(unittest.mock.MagicMock())
-        assert result.shape == (_C, _H, _W)
-
-    def test_output_is_tensor(
-        self, mock_image_processor: unittest.mock.MagicMock
+    def test_output_shape(
+        self,
+        mock_image_processor: unittest.mock.MagicMock,
+        dummy_image: PIL.Image.Image,
     ) -> None:
         with unittest.mock.patch(
             "mole_jepa.data.transforms.transformers.AutoImageProcessor"
@@ -61,7 +66,21 @@ class TestBuildImageTransform:
             mock_cls.from_pretrained.return_value = mock_image_processor
             transform = transforms.build_image_transform(_MODEL_NAME)
 
-        result = transform(unittest.mock.MagicMock())
+        result = transform(dummy_image)
+        assert result.shape == (_C, _H, _W)
+
+    def test_output_is_tensor(
+        self,
+        mock_image_processor: unittest.mock.MagicMock,
+        dummy_image: PIL.Image.Image,
+    ) -> None:
+        with unittest.mock.patch(
+            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = mock_image_processor
+            transform = transforms.build_image_transform(_MODEL_NAME)
+
+        result = transform(dummy_image)
         assert isinstance(result, torch.Tensor)
 
 
