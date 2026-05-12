@@ -15,10 +15,9 @@ import datasets as hf_datasets
 import torch
 import torch.utils.data
 
-from mole_jepa import checkpoint as checkpoint_module
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
-from mole_jepa import factory, losses, models
+from mole_jepa import factory, losses, model_io, models
 
 _STATS_FILE = "stats.jsonl"
 
@@ -486,7 +485,7 @@ def main() -> None:
     model_config = construct_model_config(args)
     data_config = construct_data_config(args, model_config)
 
-    loc = checkpoint_module.location(args.checkpoint_dir, model_config)
+    loc = model_io.model_dir(args.checkpoint_dir, model_config)
     model, loss_fn = factory.build(model_config)
     model = model.to(device)
     loss_fn = loss_fn.to(device)
@@ -498,22 +497,21 @@ def main() -> None:
     )
 
     # ── resume detection ──────────────────────────────────────────────────────
-    # Auto-resume if a checkpoint for this exact config hash exists.
+    # Auto-resume if a train state for this exact config hash exists.
     # A changed hyperparameter → different hash → fresh run automatically.
-    resuming = (loc / checkpoint_module._CHECKPOINT_FILE).exists()
+    resuming = model_io.has_train_state(model_config, args.checkpoint_dir)
 
     start_epoch = 0
     if resuming:
-        ckpt = torch.load(
-            loc / checkpoint_module._CHECKPOINT_FILE,
-            map_location=device,
-            weights_only=True,
+        model_io.load_model_weights(
+            model, model_config, args.checkpoint_dir, map_location=device
         )
-        model.load_state_dict(ckpt["model_state_dict"])
-        if (opt_state := ckpt.get("optimizer_state_dict")) is not None:
-            optimizer.load_state_dict(opt_state)
-        start_epoch = ckpt["epoch"] + 1
-        print(f"Resuming from checkpoint at epoch {start_epoch} ({loc})")
+        train_state = model_io.load_train_state(model_config, args.checkpoint_dir)
+        assert train_state is not None
+        opt_state_dict, last_epoch = train_state
+        optimizer.load_state_dict(opt_state_dict)
+        start_epoch = last_epoch + 1
+        print(f"Resuming from epoch {start_epoch} ({loc})")
     else:
         print(f"Starting fresh run ({loc})")
 
@@ -525,8 +523,9 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        checkpoint_module.save(
-            model, optimizer, current_epoch, model_config, args.checkpoint_dir
+        model_io.save_model(model, model_config, args.checkpoint_dir)
+        model_io.save_train_state(
+            optimizer, current_epoch, model_config, args.checkpoint_dir
         )
         sys.exit(99)
 
@@ -575,16 +574,16 @@ def main() -> None:
                 max_batches=args.max_batches,
             )
             log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
-            checkpoint_module.save(
-                model, optimizer, epoch, model_config, args.checkpoint_dir
+            model_io.save_model(model, model_config, args.checkpoint_dir)
+            model_io.save_train_state(
+                optimizer, epoch, model_config, args.checkpoint_dir
             )
 
     # Training completed successfully.
-    # Save the final model weights, then remove the partial checkpoint — it was
-    # only needed for resumption and is no longer useful.
-    final_epoch = args.num_epochs - 1
-    checkpoint_module.save_final(model, final_epoch, model_config, args.checkpoint_dir)
-    (loc / checkpoint_module._CHECKPOINT_FILE).unlink(missing_ok=True)
+    # Save the final model weights, then remove the ephemeral train state —
+    # it is only needed for resumption and is no longer useful.
+    model_io.save_model(model, model_config, args.checkpoint_dir)
+    model_io.cleanup_train_state(model_config, args.checkpoint_dir)
 
 
 if __name__ == "__main__":
