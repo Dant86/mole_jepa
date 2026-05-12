@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      margin: 0;
+      background: #1e1e1e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: monospace;
+      gap: 24px;
+    }
+    p { color: #888; font-size: 13px; margin: 0; }
+    canvas { image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+
+  <!-- Source SVG — hidden, used only for rasterising -->
+  <svg id="src" xmlns="http://www.w3.org/2000/svg"
+       viewBox="0 0 280 300" width="280" height="300"
+       style="display:none">
+    <defs>
+      <radialGradient id="sky" cx="50%" cy="0%" r="100%">
+        <stop offset="0%"   stop-color="#C9E8F5"/>
+        <stop offset="100%" stop-color="#A8D5ED"/>
+      </radialGradient>
+      <radialGradient id="faceC" cx="40%" cy="35%" r="65%">
+        <stop offset="0%"   stop-color="#EAD5AE"/>
+        <stop offset="100%" stop-color="#CAA87A"/>
+      </radialGradient>
+      <radialGradient id="bodyGrad" cx="35%" cy="30%" r="70%">
+        <stop offset="0%"   stop-color="#7A5030"/>
+        <stop offset="100%" stop-color="#3E2410"/>
+      </radialGradient>
+      <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#00000040"/>
+      </filter>
+    </defs>
+
+    <rect width="280" height="300" fill="url(#sky)"/>
+    <circle cx="240" cy="45" r="28" fill="#F9E07A" opacity="0.85"/>
+    <rect x="0" y="210" width="280" height="90" fill="#5C3A18"/>
+    <path d="M0,202 C30,192 70,208 110,200 C150,192 190,208 230,200 C255,195 270,202 280,200
+             L280,300 L0,300 Z" fill="#7A4E22"/>
+    <ellipse cx="45"  cy="228" rx="14" ry="5"  fill="#4A2E0E" opacity="0.35"/>
+    <ellipse cx="145" cy="242" rx="10" ry="4"  fill="#4A2E0E" opacity="0.30"/>
+    <ellipse cx="230" cy="235" rx="13" ry="4"  fill="#4A2E0E" opacity="0.35"/>
+    <ellipse cx="90"  cy="255" rx="7"  ry="3"  fill="#6A4820" opacity="0.45"/>
+    <ellipse cx="200" cy="258" rx="6"  ry="3"  fill="#6A4820" opacity="0.40"/>
+    <ellipse cx="140" cy="205" rx="52" ry="18" fill="#4A2E0E" opacity="0.75"/>
+    <ellipse cx="140" cy="148" rx="52" ry="68" fill="url(#bodyGrad)" filter="url(#softShadow)"/>
+    <ellipse cx="140" cy="138" rx="36" ry="40" fill="url(#faceC)"/>
+    <ellipse cx="105" cy="97"  rx="15" ry="11" fill="#5C3818" transform="rotate(-18,105,97)"/>
+    <ellipse cx="175" cy="97"  rx="15" ry="11" fill="#5C3818" transform="rotate(18,175,97)"/>
+    <ellipse cx="105" cy="97"  rx="9"  ry="6"  fill="#C8A878" transform="rotate(-18,105,97)" opacity="0.6"/>
+    <ellipse cx="175" cy="97"  rx="9"  ry="6"  fill="#C8A878" transform="rotate(18,175,97)"  opacity="0.6"/>
+    <circle cx="124" cy="128" r="10"  fill="#1A1010"/>
+    <circle cx="156" cy="128" r="10"  fill="#1A1010"/>
+    <circle cx="126" cy="124" r="4"   fill="white"/>
+    <circle cx="158" cy="124" r="4"   fill="white"/>
+    <ellipse cx="140" cy="152" rx="18" ry="13" fill="#C0946A"/>
+    <ellipse cx="140" cy="146" rx="7"  ry="5"  fill="#2A1408"/>
+    <line x1="122" y1="152" x2="82"  y2="145" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="122" y1="158" x2="82"  y2="158" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="122" y1="164" x2="82"  y2="171" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="158" y1="152" x2="198" y2="145" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="158" y1="158" x2="198" y2="158" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="158" y1="164" x2="198" y2="171" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  </svg>
+
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 300" width="280" height="300">
+    <defs>
+      <radialGradient id="sky2" cx="50%" cy="0%" r="100%">
+        <stop offset="0%" stop-color="#C9E8F5"/>
+        <stop offset="100%" stop-color="#A8D5ED"/>
+      </radialGradient>
+      <radialGradient id="faceC2" cx="40%" cy="35%" r="65%">
+        <stop offset="0%" stop-color="#EAD5AE"/>
+        <stop offset="100%" stop-color="#CAA87A"/>
+      </radialGradient>
+      <radialGradient id="bodyGrad2" cx="35%" cy="30%" r="70%">
+        <stop offset="0%" stop-color="#7A5030"/>
+        <stop offset="100%" stop-color="#3E2410"/>
+      </radialGradient>
+      <filter id="softShadow2" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#00000040"/>
+      </filter>
+    </defs>
+    <rect width="280" height="300" fill="url(#sky2)"/>
+    <circle cx="240" cy="45" r="28" fill="#F9E07A" opacity="0.85"/>
+    <rect x="0" y="210" width="280" height="90" fill="#5C3A18"/>
+    <path d="M0,202 C30,192 70,208 110,200 C150,192 190,208 230,200 C255,195 270,202 280,200 L280,300 L0,300 Z" fill="#7A4E22"/>
+    <ellipse cx="45"  cy="228" rx="14" ry="5"  fill="#4A2E0E" opacity="0.35"/>
+    <ellipse cx="145" cy="242" rx="10" ry="4"  fill="#4A2E0E" opacity="0.30"/>
+    <ellipse cx="230" cy="235" rx="13" ry="4"  fill="#4A2E0E" opacity="0.35"/>
+    <ellipse cx="90"  cy="255" rx="7"  ry="3"  fill="#6A4820" opacity="0.45"/>
+    <ellipse cx="200" cy="258" rx="6"  ry="3"  fill="#6A4820" opacity="0.40"/>
+    <ellipse cx="140" cy="205" rx="52" ry="18" fill="#4A2E0E" opacity="0.75"/>
+    <ellipse cx="140" cy="148" rx="52" ry="68" fill="url(#bodyGrad2)" filter="url(#softShadow2)"/>
+    <ellipse cx="140" cy="138" rx="36" ry="40" fill="url(#faceC2)"/>
+    <ellipse cx="105" cy="97"  rx="15" ry="11" fill="#5C3818" transform="rotate(-18,105,97)"/>
+    <ellipse cx="175" cy="97"  rx="15" ry="11" fill="#5C3818" transform="rotate(18,175,97)"/>
+    <ellipse cx="105" cy="97"  rx="9"  ry="6"  fill="#C8A878" transform="rotate(-18,105,97)" opacity="0.6"/>
+    <ellipse cx="175" cy="97"  rx="9"  ry="6"  fill="#C8A878" transform="rotate(18,175,97)"  opacity="0.6"/>
+    <circle cx="124" cy="128" r="10"  fill="#1A1010"/>
+    <circle cx="156" cy="128" r="10"  fill="#1A1010"/>
+    <circle cx="126" cy="124" r="4"   fill="white"/>
+    <circle cx="158" cy="124" r="4"   fill="white"/>
+    <ellipse cx="140" cy="152" rx="18" ry="13" fill="#C0946A"/>
+    <ellipse cx="140" cy="146" rx="7"  ry="5"  fill="#2A1408"/>
+    <line x1="122" y1="152" x2="82"  y2="145" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="122" y1="158" x2="82"  y2="158" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="122" y1="164" x2="82"  y2="171" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="158" y1="152" x2="198" y2="145" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="158" y1="158" x2="198" y2="158" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+    <line x1="158" y1="164" x2="198" y2="171" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  </svg>
+  <p>MoLeJEPA mascot — working title "Digby"</p>
+</body>
+</html>

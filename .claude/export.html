@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Digby export</title></head>
+<body style="margin:0;background:transparent">
+<!-- Tight crop around Digby only — no sky, no ground, transparent bg.
+     viewBox="74 78 132 153" isolates the mole from the original 280×300 canvas.
+     Rendered at 6× → 792 × 918 px (≈ 2.6" × 3.1" at 300 dpi). -->
+<svg id="src" xmlns="http://www.w3.org/2000/svg"
+     viewBox="74 78 132 153" width="792" height="918">
+  <defs>
+    <radialGradient id="faceE" cx="40%" cy="35%" r="65%">
+      <stop offset="0%"   stop-color="#EAD5AE"/>
+      <stop offset="100%" stop-color="#CAA87A"/>
+    </radialGradient>
+    <radialGradient id="bodyE" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#7A5030"/>
+      <stop offset="100%" stop-color="#3E2410"/>
+    </radialGradient>
+  </defs>
+
+  <!-- dirt collar -->
+  <ellipse cx="140" cy="205" rx="52" ry="18" fill="#4A2E0E" opacity="0.75"/>
+  <!-- body -->
+  <ellipse cx="140" cy="148" rx="52" ry="68" fill="url(#bodyE)"/>
+  <!-- face patch -->
+  <ellipse cx="140" cy="138" rx="36" ry="40" fill="url(#faceE)"/>
+  <!-- ears -->
+  <ellipse cx="105" cy="97"  rx="15" ry="11" fill="#5C3818" transform="rotate(-18,105,97)"/>
+  <ellipse cx="175" cy="97"  rx="15" ry="11" fill="#5C3818" transform="rotate(18,175,97)"/>
+  <ellipse cx="105" cy="97"  rx="9"  ry="6"  fill="#C8A878" transform="rotate(-18,105,97)" opacity="0.6"/>
+  <ellipse cx="175" cy="97"  rx="9"  ry="6"  fill="#C8A878" transform="rotate(18,175,97)"  opacity="0.6"/>
+  <!-- eyes -->
+  <circle cx="124" cy="128" r="10"  fill="#1A1010"/>
+  <circle cx="156" cy="128" r="10"  fill="#1A1010"/>
+  <circle cx="126" cy="124" r="4"   fill="white"/>
+  <circle cx="158" cy="124" r="4"   fill="white"/>
+  <!-- muzzle -->
+  <ellipse cx="140" cy="152" rx="18" ry="13" fill="#C0946A"/>
+  <!-- nose -->
+  <ellipse cx="140" cy="146" rx="7"  ry="5"  fill="#2A1408"/>
+  <!-- whiskers -->
+  <line x1="122" y1="152" x2="82"  y2="145" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  <line x1="122" y1="158" x2="82"  y2="158" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  <line x1="122" y1="164" x2="82"  y2="171" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  <line x1="158" y1="152" x2="198" y2="145" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  <line x1="158" y1="158" x2="198" y2="158" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+  <line x1="158" y1="164" x2="198" y2="171" stroke="#8A6840" stroke-width="1.5" opacity="0.7"/>
+</svg>
+
+<canvas id="c" width="792" height="918" style="display:none"></canvas>
+<script>
+  const svg  = document.getElementById('src');
+  const xml  = new XMLSerializer().serializeToString(svg);
+  const blob = new Blob([xml], { type: 'image/svg+xml' });
+  const url  = URL.createObjectURL(blob);
+  const img  = new Image();
+  img.onload = () => {
+    const canvas = document.getElementById('c');
+    const ctx    = canvas.getContext('2d');
+    // transparent background — don't fill
+    ctx.drawImage(img, 0, 0);
+    window._pngData = canvas.toDataURL('image/png');
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+</script>
+</body>
+</html>
