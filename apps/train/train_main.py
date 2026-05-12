@@ -227,6 +227,9 @@ def build_loader(
         num_workers=data_config.num_workers,
         worker_init_fn=data_module.CC3MDataset.worker_init_fn,
         pin_memory=(device.type == "cuda"),
+        # Keep workers alive between epochs — avoids re-spawning processes and
+        # re-initialising transforms / tokenizers at the start of every epoch.
+        persistent_workers=(data_config.num_workers > 0),
     )
 
 

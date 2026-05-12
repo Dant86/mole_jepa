@@ -4,6 +4,7 @@ import collections.abc
 
 import PIL.Image
 import torch
+import torchvision.transforms as T
 import transformers
 
 from mole_jepa import config as config_module
@@ -12,26 +13,49 @@ from mole_jepa import config as config_module
 def build_image_transform(
     model_name: str,
 ) -> collections.abc.Callable[[PIL.Image.Image], torch.Tensor]:
-    """Build an image transform using a HuggingFace image processor.
+    """Build an image transform using torchvision, parameterised by the model.
 
-    The returned callable accepts a PIL image and returns a ``(C, H, W)``
-    float tensor normalised according to the processor's configuration.
+    Reads resize/crop/normalisation settings from the HuggingFace
+    ``AutoImageProcessor`` config once, then builds a pure-torchvision
+    ``Compose`` pipeline.  This is substantially faster than calling the
+    HuggingFace processor on every sample because torchvision runs its
+    transforms in compiled C++ rather than Python/numpy.
 
     Args:
         model_name: HuggingFace model identifier for the image processor.
 
     Returns:
-        A callable that maps a PIL image to a ``(C, H, W)`` tensor.
+        A callable that maps a PIL image (RGB) to a ``(C, H, W)`` tensor.
     """
     processor = transformers.AutoImageProcessor.from_pretrained(model_name)
 
-    def transform(image: PIL.Image.Image) -> torch.Tensor:
-        result: torch.Tensor = processor(images=image, return_tensors="pt")[
-            "pixel_values"
-        ].squeeze(0)
-        return result
+    # Resolve resize target — some configs use "shortest_edge", others "height"/"width".
+    size_cfg = processor.size
+    if "shortest_edge" in size_cfg:
+        resize_to: int | tuple[int, int] = int(size_cfg["shortest_edge"])
+    else:
+        resize_to = (int(size_cfg["height"]), int(size_cfg["width"]))
 
-    return transform
+    # Resolve crop size.
+    crop_cfg = getattr(processor, "crop_size", None)
+    if crop_cfg is not None:
+        crop_to: tuple[int, int] = (int(crop_cfg["height"]), int(crop_cfg["width"]))
+    elif isinstance(resize_to, tuple):
+        crop_to = resize_to
+    else:
+        crop_to = (resize_to, resize_to)
+
+    mean: list[float] = list(processor.image_mean)
+    std: list[float] = list(processor.image_std)
+
+    return T.Compose(
+        [
+            T.Resize(resize_to, interpolation=T.InterpolationMode.BICUBIC),
+            T.CenterCrop(crop_to),
+            T.ToTensor(),  # PIL [0,255] HWC → float [0,1] CHW
+            T.Normalize(mean=mean, std=std),
+        ]
+    )
 
 
 def build_tokenizer(
