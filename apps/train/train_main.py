@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import dataclasses
 import datetime
 import json
 import logging
@@ -67,6 +68,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Stop each epoch after this many batches. "
             "Useful for a quick smoke-test on the cluster (e.g. --max-batches 1)."
+        ),
+    )
+    parser.add_argument(
+        "--val-interval",
+        type=int,
+        default=1,
+        help=(
+            "Run validation and log stats every this many epochs (default: 1). "
+            "Checkpoints are saved every epoch regardless."
         ),
     )
 
@@ -225,18 +235,20 @@ def log_stats(
     epoch: int,
     train_stats: dict[str, float],
     train_batches: int,
-    val_stats: dict[str, float],
-    val_batches: int,
+    val_stats: dict[str, float] | None = None,
+    val_batches: int | None = None,
 ) -> None:
     """Append one stats record to ``stats.jsonl`` inside ``model_loc``.
 
     Each line is a self-contained JSON object, making the file easy to tail,
     parse incrementally, or load with ``pandas.read_json(..., lines=True)``.
 
+    Train stats are written every epoch. Val stats are optional and only
+    present in records for epochs where validation was run.
+
     For :class:`~mole_jepa.losses.JEPALoss`, the record includes
     ``train_loss``, ``train_loss_mse``, ``train_loss_reg_image``, and
-    ``train_loss_reg_text`` (and their ``val_`` equivalents) so each
-    component can be tracked independently.
+    ``train_loss_reg_text`` (and their ``val_`` equivalents when present).
 
     Args:
         model_loc: Directory in which to write the stats file.
@@ -246,16 +258,19 @@ def log_stats(
             "loss_reg_text": …}``).
         train_batches: Number of training batches processed this epoch.
         val_stats: Same structure as ``train_stats`` for the validation set.
+            ``None`` when validation was not run this epoch.
         val_batches: Number of validation batches processed this epoch.
+            ``None`` when validation was not run this epoch.
     """
     record: dict[str, Any] = {
         "epoch": epoch,
         "train_batches": train_batches,
-        "val_batches": val_batches,
         **{f"train_{k}": v for k, v in train_stats.items()},
-        **{f"val_{k}": v for k, v in val_stats.items()},
         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
     }
+    if val_stats is not None and val_batches is not None:
+        record["val_batches"] = val_batches
+        record.update({f"val_{k}": v for k, v in val_stats.items()})
     os.makedirs(model_loc, exist_ok=True)
     with open(model_loc / _STATS_FILE, "a") as f:
         f.write(json.dumps(record) + "\n")
@@ -407,6 +422,10 @@ def main() -> None:
     model_config = resolve_model_config(args)
     data_config = construct_data_config(args, model_config)
 
+    print(f"config: {args.config}")
+    for field in dataclasses.fields(model_config):
+        print(f"  {field.name} = {getattr(model_config, field.name)!r}")
+
     loc = model_io.model_dir(args.checkpoint_dir, model_config)
     model, loss_fn = factory.build(model_config)
     model = model.to(device)
@@ -494,7 +513,9 @@ def main() -> None:
             max_batches=args.max_batches,
         )
 
-        if (epoch + 1) % 5 == 0:
+        val_stats: dict[str, float] | None = None
+        val_batches: int | None = None
+        if (epoch + 1) % args.val_interval == 0:
             val_stats, val_batches = run_epoch(
                 model,
                 loss_fn,
@@ -504,11 +525,10 @@ def main() -> None:
                 train=False,
                 max_batches=args.max_batches,
             )
-            log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
-            model_io.save_model(model, model_config, args.checkpoint_dir)
-            model_io.save_train_state(
-                optimizer, epoch, model_config, args.checkpoint_dir
-            )
+
+        log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
+        model_io.save_model(model, model_config, args.checkpoint_dir)
+        model_io.save_train_state(optimizer, epoch, model_config, args.checkpoint_dir)
 
     # Training completed successfully.
     # Save the final model weights, then remove the ephemeral train state —
