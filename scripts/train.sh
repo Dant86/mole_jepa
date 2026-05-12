@@ -45,6 +45,11 @@ source .env
 mkdir -p "${LOG_DIR}"
 exec > "${LOG_DIR}/train_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/train_${SLURM_JOB_ID}.err"
 
+if [[ -z "${CONFIG:-}" ]]; then
+    echo "ERROR: CONFIG is not set in .env. Set it to a key from src/mole_jepa/registry.py." >&2
+    exit 1
+fi
+
 mkdir -p "${CHECKPOINT_DIR}"
 uv sync
 
@@ -84,6 +89,7 @@ trap on_preempt USR1
 trap on_term TERM
 
 setsid uv run python apps/train/train_main.py \
+    --config               "${CONFIG}" \
     --checkpoint-dir       "${CHECKPOINT_DIR}" \
     --num-epochs           100 \
     --lr                   1e-4 \
@@ -98,10 +104,6 @@ setsid uv run python apps/train/train_main.py \
     --val-hf-dataset-split validation \
     --image-field          jpg \
     --caption-field        txt \
-    --embed-dim            256 \
-    --predictor-hidden-dim 512 \
-    --predictor-n-layers   2 \
-    --sigreg-n-directions  128 \
     "$@" &
 PY_PID=$!
 

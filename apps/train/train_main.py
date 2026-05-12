@@ -17,7 +17,7 @@ import torch.utils.data
 
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
-from mole_jepa import factory, losses, model_io, models
+from mole_jepa import factory, losses, model_io, models, registry
 
 _STATS_FILE = "stats.jsonl"
 
@@ -36,9 +36,17 @@ def parse_args() -> argparse.Namespace:
     Returns:
         A :class:`Namespace` object.
     """
-    mcfg = config_module.ModelConfig()
     dcfg = config_module.DataConfig()
+    valid_configs = ", ".join(sorted(registry.CONFIGS))
     parser = argparse.ArgumentParser()
+
+    # ── model ─────────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--config",
+        required=True,
+        metavar="NAME",
+        help=f"Named model config from the registry. One of: {valid_configs}.",
+    )
 
     # ── training ──────────────────────────────────────────────────────────────
     parser.add_argument(
@@ -135,119 +143,25 @@ def parse_args() -> argparse.Namespace:
         help="Dataset field name containing the caption (default: 'txt').",
     )
 
-    # ── shared model ──────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--embed-dim",
-        type=int,
-        default=mcfg.embed_dim,
-        help="Shared embedding dimension for both encoders and the predictor.",
-    )
-
-    # ── encoders ──────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--image-encoder-model-name",
-        default=mcfg.image_encoder_model_name,
-        help="HuggingFace model identifier for the image encoder (ViT).",
-    )
-    parser.add_argument(
-        "--text-encoder-model-name",
-        default=mcfg.text_encoder_model_name,
-        help="HuggingFace model identifier for the text encoder (LM).",
-    )
-
-    # ── predictor ─────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--predictor-hidden-dim",
-        type=int,
-        default=mcfg.predictor_hidden_dim,
-        help="Hidden width of the MLP predictor.",
-    )
-    parser.add_argument(
-        "--predictor-n-layers",
-        type=int,
-        default=mcfg.predictor_n_layers,
-        help="Total number of linear layers in the MLP predictor.",
-    )
-
-    # ── loss ──────────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--use-contrastive-loss",
-        action="store_true",
-        help="Use InfoNCE loss instead of JEPALoss with SIGReg.",
-    )
-    parser.add_argument(
-        "--sigreg-dist",
-        choices=["gaussian", "laplace"],
-        default=mcfg.sigreg_dist,
-        help="Target distribution for the SIGReg Epps-Pulley statistic.",
-    )
-    parser.add_argument(
-        "--sigreg-n-directions",
-        type=int,
-        default=mcfg.sigreg_n_directions,
-        help="Number of random projection directions used by SIGReg.",
-    )
-    parser.add_argument(
-        "--sigreg-demean",
-        action="store_true",
-        default=mcfg.sigreg_demean,
-        help=(
-            "Subtract the batch mean before applying SIGReg, removing the "
-            "zero-mean constraint so each modality can keep its own offset."
-        ),
-    )
-    parser.add_argument(
-        "--jepa-lam",
-        type=float,
-        default=mcfg.jepa_lam,
-        help=(
-            "Regularization weight λ for JEPALoss. MSE weight is "
-            "1 - λ. Default 0.05 per the LeJEPA paper."
-        ),
-    )
-    parser.add_argument(
-        "--no-regularize-zt",
-        dest="jepa_regularize_z_t",
-        action="store_false",
-        help=(
-            "Disable SIGReg on text embeddings z_t. Only regularizes the "
-            "image encoder; the text encoder acts as an unregularized target."
-        ),
-    )
-    parser.set_defaults(jepa_regularize_z_t=mcfg.jepa_regularize_z_t)
-    parser.add_argument(
-        "--info-nce-temperature",
-        type=float,
-        default=mcfg.info_nce_temperature,
-        help="Softmax temperature for InfoNCELoss.",
-    )
-
     return parser.parse_args()
 
 
-def construct_model_config(args: argparse.Namespace) -> config_module.ModelConfig:
-    """Construct a :class:`~mole_jepa.config.ModelConfig` from CLI arguments.
+def resolve_model_config(args: argparse.Namespace) -> config_module.ModelConfig:
+    """Resolve a named config from the registry.
 
     Args:
-        args: Parsed CLI arguments.
+        args: Parsed CLI arguments (must include ``args.config``).
 
     Returns:
-        A :class:`~mole_jepa.config.ModelConfig` instance.
+        The :class:`~mole_jepa.config.ModelConfig` registered under that name.
+
+    Raises:
+        SystemExit: If ``args.config`` is not a registered name.
     """
-    return config_module.ModelConfig(
-        embed_dim=args.embed_dim,
-        image_encoder_model_name=args.image_encoder_model_name,
-        text_encoder_model_name=args.text_encoder_model_name,
-        predictor_hidden_dim=args.predictor_hidden_dim,
-        predictor_n_layers=args.predictor_n_layers,
-        contrastive=args.use_contrastive_loss,
-        sigreg_dist=args.sigreg_dist,
-        sigreg_n_directions=args.sigreg_n_directions,
-        sigreg_demean=args.sigreg_demean,
-        jepa_lam=args.jepa_lam,
-        jepa_regularize_z_t=args.jepa_regularize_z_t,
-        info_nce_temperature=args.info_nce_temperature,
-    )
+    if args.config not in registry.CONFIGS:
+        valid = ", ".join(sorted(registry.CONFIGS))
+        raise SystemExit(f"Unknown config '{args.config}'. Valid configs: {valid}")
+    return registry.CONFIGS[args.config]
 
 
 def construct_data_config(
@@ -482,7 +396,7 @@ def main() -> None:
     device = _get_device()
     print(f"device: {device}")
 
-    model_config = construct_model_config(args)
+    model_config = resolve_model_config(args)
     data_config = construct_data_config(args, model_config)
 
     loc = model_io.model_dir(args.checkpoint_dir, model_config)
