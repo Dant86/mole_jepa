@@ -11,7 +11,7 @@
 #SBATCH --job-name=mole_jepa_train
 #SBATCH --partition=general
 #SBATCH --qos=general
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:h200:1
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
@@ -89,7 +89,7 @@ setsid uv run python apps/train/train_main.py \
     --lr                   1e-4 \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
-    --batch-size           256 \
+    --batch-size           1024 \
     --num-workers          8 \
     --max-seq-length       64 \
     --hf-dataset-name      "${CC3M_LOCAL_DIR}/train" \
