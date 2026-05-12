@@ -3,7 +3,7 @@
 [![codecov](https://codecov.io/github/Dant86/mole_jepa/graph/badge.svg?token=EFA7KKVN22)](https://codecov.io/github/Dant86/mole_jepa)
 
 <div align="center">
-  <img src="assets/mole.svg" width="320" alt="pixel art mole">
+  <img src="assets/digby.png" width="180" alt="Digby the burrowing mole">
 </div>
 
 A multimodal JEPA that predicts text embeddings from image embeddings,
