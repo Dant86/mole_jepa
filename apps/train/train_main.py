@@ -354,13 +354,21 @@ def run_epoch(
     totals: dict[str, float] = {}
     n_batches = 0
 
+    # BF16 autocast on CUDA: halves activation memory and uses tensor-core throughput.
+    # No GradScaler needed — BF16 has the same exponent range as float32.
+    amp_ctx = torch.amp.autocast(
+        device.type,
+        dtype=torch.bfloat16,
+        enabled=(device.type == "cuda"),
+    )
     ctx = contextlib.nullcontext() if train else torch.no_grad()
     with ctx:
         for batch_idx, batch in enumerate(loader):
             if max_batches is not None and batch_idx >= max_batches:
                 break
 
-            loss, components = _forward_batch(model, loss_fn, batch, device)
+            with amp_ctx:
+                loss, components = _forward_batch(model, loss_fn, batch, device)
 
             if train:
                 assert optimizer is not None
