@@ -32,4 +32,13 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_n_layers=2,
         contrastive=False,
     ),
+    "vit_base_bert_jepa_diff_mean": config_module.ModelConfig(
+        embed_dim=256,
+        image_encoder_model_name="google/vit-base-patch16-224",
+        text_encoder_model_name="bert-base-uncased",
+        predictor_hidden_dim=512,
+        predictor_n_layers=2,
+        contrastive=False,
+        sigreg_demean=True,
+    ),
 }
