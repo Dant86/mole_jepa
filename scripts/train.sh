@@ -12,6 +12,7 @@
 #SBATCH --partition=general
 #SBATCH --qos=general
 #SBATCH --gres=gpu:h200:1
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
@@ -25,6 +26,9 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
+# Prevents the HuggingFace tokenizers Rust library from spawning threads
+# before DataLoader forks workers, which can cause deadlocks or silent crashes.
+export TOKENIZERS_PARALLELISM=false
 
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -90,7 +94,7 @@ setsid uv run python apps/train/train_main.py \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
     --batch-size           1024 \
-    --num-workers          8 \
+    --num-workers          4 \
     --max-seq-length       64 \
     --hf-dataset-name      "${CC3M_LOCAL_DIR}/train" \
     --hf-dataset-split     train \
