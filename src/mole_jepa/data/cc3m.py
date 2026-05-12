@@ -70,15 +70,25 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
         super().__init__()
         self._dataset = hf_dataset
         self._config = config
+        # Build transforms once in the main process so worker processes inherit
+        # the already-constructed torchvision pipeline via fork.  The previous
+        # approach built them inside __iter__, which caused each worker to call
+        # AutoImageProcessor.from_pretrained / AutoTokenizer.from_pretrained on
+        # every epoch start — hitting the HF Hub and blocking for tens of seconds
+        # per worker before any training step could run.
+        # torchvision Compose objects are picklable, so this is also safe for
+        # spawn-based multiprocessing (macOS, Windows).
+        self._image_transform = transforms.build_image_transform(
+            config.image_processor_model_name
+        )
+        self._tokenize = transforms.build_tokenizer(
+            config.tokenizer_model_name, config.max_seq_length
+        )
 
     def __iter__(
         self,
     ) -> collections.abc.Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Iterate over ``(pixel_values, input_ids, attention_mask)`` triples.
-
-        Transforms are built here rather than in ``__init__`` so that the
-        dataset remains picklable for multi-worker DataLoaders. Each worker
-        process constructs its own transforms after the dataset is forked.
 
         When the image field contains a URL string it is fetched over HTTP.
         Examples whose image cannot be retrieved or decoded are skipped with a
@@ -96,12 +106,6 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
             category=UserWarning,
         )
 
-        image_transform = transforms.build_image_transform(
-            self._config.image_processor_model_name
-        )
-        tokenize = transforms.build_tokenizer(
-            self._config.tokenizer_model_name, self._config.max_seq_length
-        )
         image_field = self._config.image_field
         caption_field = self._config.caption_field
         for example in self._dataset:
@@ -114,8 +118,8 @@ class CC3MDataset(torch.utils.data.IterableDataset):  # type: ignore[type-arg]
                     continue
             else:
                 image = raw.convert("RGB")
-            pixel_values = image_transform(image)
-            input_ids, attention_mask = tokenize(example[caption_field])
+            pixel_values = self._image_transform(image)
+            input_ids, attention_mask = self._tokenize(example[caption_field])
             yield pixel_values, input_ids, attention_mask
 
     @staticmethod
