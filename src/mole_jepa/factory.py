@@ -32,6 +32,12 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
         ),
     )
 
+    if config.freeze_image_encoder:
+        # Freeze the ViT backbone; the projection head remains trainable so
+        # the model can still learn to map frozen features into the shared
+        # embedding space.
+        model.image_encoder.vit.requires_grad_(False)
+
     loss: nn.Module
     if config.contrastive:
         loss = losses.InfoNCELoss(temperature=config.info_nce_temperature)

@@ -75,3 +75,17 @@ class TestBuild:
         _, loss = factory_module.build(config_module.ModelConfig(jepa_lam=lam))
         assert isinstance(loss, losses.JEPALoss)
         assert loss.lam == pytest.approx(lam)
+
+    def test_freeze_image_encoder_freezes_vit(
+        self, mock_pretrained: unittest.mock.MagicMock
+    ) -> None:
+        model, _ = factory_module.build(
+            config_module.ModelConfig(freeze_image_encoder=True)
+        )
+        mock_pretrained.requires_grad_.assert_called_once_with(False)
+
+    def test_freeze_image_encoder_false_does_not_freeze(
+        self, mock_pretrained: unittest.mock.MagicMock
+    ) -> None:
+        factory_module.build(config_module.ModelConfig(freeze_image_encoder=False))
+        mock_pretrained.requires_grad_.assert_not_called()

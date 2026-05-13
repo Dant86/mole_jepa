@@ -32,6 +32,11 @@ class ModelConfig:
             image and text embeddings. If ``False``, only regularize the image
             embeddings; the text encoder acts as an unregularized target.
         info_nce_temperature: Softmax temperature for InfoNCELoss.
+        freeze_image_encoder: If ``True`` (default), freeze the ViT backbone
+            weights so only the projection head remains trainable. The
+            projection head is always trained regardless of this flag.
+            Motivated by VL-JEPA, which treats the vision encoder as a fixed
+            semantic feature extractor.
     """
 
     embed_dim: int = 256
@@ -46,6 +51,7 @@ class ModelConfig:
     jepa_lam: float = 0.05
     jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07
+    freeze_image_encoder: bool = True
 
     def serialize(self) -> str:
         """Serialize this config to a stable SHA-256 hex string.
