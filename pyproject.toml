@@ -51,6 +51,7 @@ omit = [
 [tool.ruff]
 line-length = 88
 target-version = "py314"
+exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [
