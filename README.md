@@ -9,6 +9,17 @@
 A multimodal JEPA that predicts text embeddings from image embeddings,
 regularized with SIGReg to prevent representational collapse.
 
+---
+
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Loading Models & Checkpoints](#loading-models--checkpoints)
+3. [Training on the DSI Cluster](#training-on-the-dsi-cluster)
+4. [Contributing](#contributing)
+
+---
+
 ## Architecture
 
 <div align="center">
@@ -29,7 +40,7 @@ The default $\lambda = 0.05$ (per the LeJEPA paper) keeps MSE as the dominant
 signal while a small regularization term prevents representational collapse.
 An InfoNCE contrastive loss is also provided as an alternative.
 
-## Project Structure
+### Project Structure
 
 ```
 src/mole_jepa/
@@ -48,7 +59,138 @@ src/mole_jepa/
 └── factory.py            # build(ModelConfig) → (MoLeJEPA, loss)
 ```
 
-## Development
+---
+
+## Loading Models & Checkpoints
+
+Checkpoints are stored under a root directory (set via `CHECKPOINT_DIR` in
+`.env`). Each run lives in its own subdirectory named by a SHA-256 hash of its
+`ModelConfig`, so different hyperparameter combinations never collide.
+
+### List available checkpoints
+
+```python
+from mole_jepa import model_io
+
+models = model_io.list_models("/path/to/checkpoints")
+for m in models:
+    print(m.config_hash[:8], m.config)
+```
+
+Filter by config fields to narrow results:
+
+```python
+contrastive_models = model_io.list_models(
+    "/path/to/checkpoints",
+    contrastive=True,
+    embed_dim=256,
+)
+```
+
+### Load a model for inference
+
+```python
+from mole_jepa import config as cfg_module, model_io
+
+config = cfg_module.ModelConfig(
+    embed_dim=256,
+    contrastive=False,
+    # ... other fields matching the saved run
+)
+
+model = model_io.load_model(config, "/path/to/checkpoints")
+model.eval()
+```
+
+`load_model` builds the architecture via `factory.build` and loads the saved
+state dict onto CPU by default. Pass `map_location="cuda"` to load directly
+onto GPU:
+
+```python
+model = model_io.load_model(config, "/path/to/checkpoints", map_location="cuda")
+```
+
+### Load weights into an existing model
+
+If you have already constructed the model (e.g. inside a training loop), use
+`load_model_weights` to avoid a redundant `from_pretrained` call:
+
+```python
+from mole_jepa import factory, model_io
+
+model, loss_fn = factory.build(config)
+model_io.load_model_weights(model, config, "/path/to/checkpoints")
+```
+
+### Run inference
+
+```python
+from mole_jepa.data import transforms
+
+# Preprocess a single image + caption
+pixel_values, input_ids, attention_mask = transforms.preprocess(
+    image,       # PIL.Image
+    caption,     # str
+    data_config, # mole_jepa.config.DataConfig
+)
+
+with torch.no_grad():
+    output = model(pixel_values, input_ids, attention_mask)
+
+# output.image_embeddings  — f(x), shape (1, embed_dim)
+# output.predicted_text_embeddings — g(f(x)), shape (1, embed_dim)
+# output.text_embeddings   — h(y), shape (1, embed_dim)
+```
+
+---
+
+## Training on the DSI Cluster
+
+### 1. Environment setup
+
+All filesystem paths and secrets live in a gitignored `.env` file. Copy the
+sample and fill in your values before running any script:
+
+```bash
+cp .env.sample .env
+# edit .env — set HF_HOME, HF_TOKEN, CC3M_LOCAL_DIR, CHECKPOINT_DIR, LOG_DIR
+```
+
+### 2. Prepare the dataset (one-time)
+
+Downloads CC3M images, resizes them to 256×256, and packs them into
+WebDataset tar shards on scratch. Skips dead URLs automatically and resumes
+from prior progress if the job is preempted.
+
+```bash
+sbatch scripts/prepare_cc3m.sh
+```
+
+Expected runtime: 8–12 hours with 64 workers. Monitor progress in
+`$LOG_DIR/prepare_cc3m_<job_id>.out` — a line is printed per completed shard
+(5,000 images each). The script stops automatically when `$CC3M_LOCAL_DIR`
+reaches the storage budget configured in `prepare_cc3m_main.py`.
+
+### 3. Train
+
+```bash
+sbatch scripts/train.sh
+```
+
+The script auto-resumes if a checkpoint for the exact current hyperparameter
+configuration exists in `$CHECKPOINT_DIR` (matched by a SHA-256 hash of the
+config). Changing any hyperparameter starts a fresh run automatically — no
+flags needed. On preemption, SLURM sends `SIGUSR1` five minutes before the
+wall-time limit; the train script catches it, saves a checkpoint, and exits so
+the job can be requeued.
+
+Logs are written to `$LOG_DIR/train_<job_id>.out` and `.err`.
+Training stats (loss, batch counts) are appended to `stats.jsonl` inside the
+checkpoint directory every epoch.
+
+---
+
+## Contributing
 
 ### Setup
 
@@ -131,47 +273,3 @@ uv run ruff check .           # lint
 uv run ruff format --check .  # format check (drop --check to auto-fix)
 uv run pyright                # type check
 ```
-
-## Training on the DSI Cluster
-
-### 1. Environment setup
-
-All filesystem paths and secrets live in a gitignored `.env` file. Copy the
-sample and fill in your values before running any script:
-
-```bash
-cp .env.sample .env
-# edit .env — set HF_HOME, HF_TOKEN, CC3M_LOCAL_DIR, CHECKPOINT_DIR, LOG_DIR
-```
-
-### 2. Prepare the dataset (one-time)
-
-Downloads CC3M images, resizes them to 256×256, and packs them into
-WebDataset tar shards on scratch. Skips dead URLs automatically and resumes
-from prior progress if the job is preempted.
-
-```bash
-sbatch scripts/prepare_cc3m.sh
-```
-
-Expected runtime: 8–12 hours with 64 workers. Monitor progress in
-`$LOG_DIR/prepare_cc3m_<job_id>.out` — a line is printed per completed shard
-(5,000 images each). The script stops automatically when `$CC3M_LOCAL_DIR`
-reaches the storage budget configured in `prepare_cc3m_main.py`.
-
-### 3. Train
-
-```bash
-sbatch scripts/train.sh
-```
-
-The script auto-resumes if a checkpoint for the exact current hyperparameter
-configuration exists in `$CHECKPOINT_DIR` (matched by a SHA-256 hash of the
-config). Changing any hyperparameter starts a fresh run automatically — no
-flags needed. On preemption, SLURM sends `SIGUSR1` five minutes before the
-wall-time limit; the train script catches it, saves a checkpoint, and exits so
-the job can be requeued.
-
-Logs are written to `$LOG_DIR/train_<job_id>.out` and `.err`.
-Training stats (loss, batch counts) are appended to `stats.jsonl` inside the
-checkpoint directory every 5 epochs.
