@@ -15,7 +15,7 @@ Naming convention: ``{image_encoder}_{text_encoder}_{loss_type}``.
 from mole_jepa import config as config_module
 
 CONFIGS: dict[str, config_module.ModelConfig] = {
-    # ── ViT-base + BERT-base ──────────────────────────────────────────────────
+    # ── ViT-base + BERT-base, unfrozen image encoder ──────────────────────────
     "vit_base_bert_contrastive": config_module.ModelConfig(
         embed_dim=256,
         image_encoder_model_name="google/vit-base-patch16-224",
@@ -23,6 +23,7 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_hidden_dim=512,
         predictor_n_layers=2,
         contrastive=True,
+        freeze_image_encoder=False,
     ),
     "vit_base_bert_jepa": config_module.ModelConfig(
         embed_dim=256,
@@ -31,6 +32,7 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_hidden_dim=512,
         predictor_n_layers=2,
         contrastive=False,
+        freeze_image_encoder=False,
     ),
     "vit_base_bert_jepa_diff_mean": config_module.ModelConfig(
         embed_dim=256,
@@ -40,5 +42,35 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_n_layers=2,
         contrastive=False,
         sigreg_demean=True,
+        freeze_image_encoder=False,
+    ),
+    # ── ViT-base + BERT-base, frozen image encoder ────────────────────────────
+    "vit_base_bert_contrastive_frozen": config_module.ModelConfig(
+        embed_dim=256,
+        image_encoder_model_name="google/vit-base-patch16-224",
+        text_encoder_model_name="bert-base-uncased",
+        predictor_hidden_dim=512,
+        predictor_n_layers=2,
+        contrastive=True,
+        freeze_image_encoder=True,
+    ),
+    "vit_base_bert_jepa_frozen": config_module.ModelConfig(
+        embed_dim=256,
+        image_encoder_model_name="google/vit-base-patch16-224",
+        text_encoder_model_name="bert-base-uncased",
+        predictor_hidden_dim=512,
+        predictor_n_layers=2,
+        contrastive=False,
+        freeze_image_encoder=True,
+    ),
+    "vit_base_bert_jepa_diff_mean_frozen": config_module.ModelConfig(
+        embed_dim=256,
+        image_encoder_model_name="google/vit-base-patch16-224",
+        text_encoder_model_name="bert-base-uncased",
+        predictor_hidden_dim=512,
+        predictor_n_layers=2,
+        contrastive=False,
+        sigreg_demean=True,
+        freeze_image_encoder=True,
     ),
 }
