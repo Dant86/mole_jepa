@@ -450,6 +450,21 @@ def main() -> None:
         print(f"  {field.name} = {getattr(model_config, field.name)!r}")
 
     loc = model_io.model_dir(args.checkpoint_dir, model_config)
+
+    # Build DataLoaders before moving the model to CUDA.  Workers are forked
+    # at first iteration, so creating them here ensures they don't inherit the
+    # CUDA context — each inherited CUDA context costs ~1.5 GB of address space
+    # and SLURM counts it against the job's --mem budget even with fork CoW.
+    loader = build_loader(
+        args.hf_dataset_name, args.hf_dataset_split, data_config, device
+    )
+    val_loader = build_loader(
+        args.val_hf_dataset_name or args.hf_dataset_name,
+        args.val_hf_dataset_split,
+        data_config,
+        device,
+    )
+
     model, loss_fn = factory.build(model_config)
     model = model.to(device)
     loss_fn = loss_fn.to(device)
@@ -514,17 +529,6 @@ def main() -> None:
     # Truncate on a fresh run; on resume, keep history and continue appending.
     if not resuming:
         (loc / _STATS_FILE).unlink(missing_ok=True)
-
-    # ── data ──────────────────────────────────────────────────────────────────
-    loader = build_loader(
-        args.hf_dataset_name, args.hf_dataset_split, data_config, device
-    )
-    val_loader = build_loader(
-        args.val_hf_dataset_name or args.hf_dataset_name,
-        args.val_hf_dataset_split,
-        data_config,
-        device,
-    )
 
     # ── training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.num_epochs):
