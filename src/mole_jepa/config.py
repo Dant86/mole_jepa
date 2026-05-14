@@ -28,9 +28,13 @@ class ModelConfig:
             maintain its own offset in the embedding space.
         jepa_lam: Regularization weight λ for JEPALoss. The MSE weight is
             ``1 - jepa_lam``. Default 0.05 per the LeJEPA paper.
-        jepa_regularize_z_t: If ``True`` (default), apply SIGReg to both
-            image and text embeddings. If ``False``, only regularize the image
-            embeddings; the text encoder acts as an unregularized target.
+        jepa_regularize_z_i: If ``True`` (default), apply SIGReg to the image
+            embeddings ``z_v``. Set to ``False`` when the image encoder is
+            frozen — MSE already prevents projection collapse, so regularizing
+            the image side creates a competing objective with no benefit.
+        jepa_regularize_z_t: If ``True`` (default), apply SIGReg to the text
+            embeddings ``z_t``. If ``False``, the text encoder acts as an
+            unregularized target.
         info_nce_temperature: Softmax temperature for InfoNCELoss.
         freeze_image_encoder: If ``True`` (default), freeze the ViT backbone
             weights so only the projection head remains trainable. The
@@ -49,6 +53,7 @@ class ModelConfig:
     sigreg_n_directions: int = 128
     sigreg_demean: bool = False
     jepa_lam: float = 0.05
+    jepa_regularize_z_i: bool = True
     jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07
     freeze_image_encoder: bool = True

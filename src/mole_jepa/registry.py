@@ -61,6 +61,7 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_hidden_dim=256,
         predictor_n_layers=2,
         contrastive=False,
+        jepa_regularize_z_i=False,
         freeze_image_encoder=True,
     ),
     "vit_tiny_bert_tiny_jepa_diff_mean_frozen": config_module.ModelConfig(
@@ -71,6 +72,7 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_n_layers=2,
         contrastive=False,
         sigreg_demean=True,
+        jepa_regularize_z_i=False,
         freeze_image_encoder=True,
     ),
     # ── ViT-base + BERT-base, frozen image encoder ────────────────────────────
@@ -90,6 +92,7 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_hidden_dim=512,
         predictor_n_layers=2,
         contrastive=False,
+        jepa_regularize_z_i=False,
         freeze_image_encoder=True,
     ),
     "vit_base_bert_jepa_diff_mean_frozen": config_module.ModelConfig(
@@ -100,6 +103,7 @@ CONFIGS: dict[str, config_module.ModelConfig] = {
         predictor_n_layers=2,
         contrastive=False,
         sigreg_demean=True,
+        jepa_regularize_z_i=False,
         freeze_image_encoder=True,
     ),
 }

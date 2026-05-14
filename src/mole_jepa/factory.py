@@ -49,6 +49,7 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
                 demean=config.sigreg_demean,
             ),
             lam=config.jepa_lam,
+            regularize_z_i=config.jepa_regularize_z_i,
             regularize_z_t=config.jepa_regularize_z_t,
         )
 

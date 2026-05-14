@@ -71,3 +71,30 @@ class TestJEPALoss:
         assert z_v.grad is not None
         assert z_hat_t.grad is not None
         assert z_t.grad is not None
+
+    def test_regularize_z_i_false_zeroes_image_reg(self) -> None:
+        """regularize_z_i=False sets loss_reg_image to zero."""
+        reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
+        loss_fn = losses.JEPALoss(regularizer=reg, lam=_LAM, regularize_z_i=False)
+        result = loss_fn(_make_output())
+        assert result.loss_reg_image.item() == pytest.approx(0.0)
+        assert result.loss_reg_text.item() > 0.0
+
+    def test_regularize_z_t_false_zeroes_text_reg(self) -> None:
+        """regularize_z_t=False sets loss_reg_text to zero."""
+        reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
+        loss_fn = losses.JEPALoss(regularizer=reg, lam=_LAM, regularize_z_t=False)
+        result = loss_fn(_make_output())
+        assert result.loss_reg_text.item() == pytest.approx(0.0)
+        assert result.loss_reg_image.item() > 0.0
+
+    def test_regularize_both_false_loss_equals_mse(self) -> None:
+        """With both reg flags off, total loss == (1 - lam) * MSE."""
+        reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
+        loss_fn = losses.JEPALoss(
+            regularizer=reg, lam=_LAM, regularize_z_i=False, regularize_z_t=False
+        )
+        result = loss_fn(_make_output())
+        assert result.loss.item() == pytest.approx(
+            (1 - _LAM) * result.loss_mse.item(), rel=1e-5
+        )
