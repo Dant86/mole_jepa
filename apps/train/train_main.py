@@ -237,7 +237,9 @@ def build_loader(
         dataset,
         batch_size=data_config.batch_size,
         num_workers=data_config.num_workers,
-        prefetch_factor=data_config.prefetch_factor if data_config.num_workers > 0 else None,
+        prefetch_factor=(
+            data_config.prefetch_factor if data_config.num_workers > 0 else None
+        ),
         worker_init_fn=data_module.CC3MDataset.worker_init_fn,
         pin_memory=(device.type == "cuda"),
         # Keep workers alive between epochs — avoids re-spawning processes and
