@@ -89,6 +89,11 @@ class DataConfig:
             truncated.
         batch_size: DataLoader batch size.
         num_workers: Number of DataLoader worker processes.
+        prefetch_factor: Number of batches each worker preloads ahead of
+            consumption. Higher values improve throughput at the cost of
+            ``/dev/shm`` usage (``prefetch_factor × num_workers × batch_size``
+            images are held in shared memory at once). Reduce to 1 if workers
+            are killed by the OOM killer at large batch sizes.
         image_field: Key used to access the image in each dataset example.
             Defaults to ``"jpg"`` to match ``pixparse/cc3m-wds``.
         caption_field: Key used to access the caption string in each dataset
@@ -100,5 +105,6 @@ class DataConfig:
     max_seq_length: int = 64
     batch_size: int = 256
     num_workers: int = 4
+    prefetch_factor: int = 2
     image_field: str = "jpg"
     caption_field: str = "txt"

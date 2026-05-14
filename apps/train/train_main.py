@@ -137,6 +137,17 @@ def parse_args() -> argparse.Namespace:
         help="Number of DataLoader worker processes.",
     )
     parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=dcfg.prefetch_factor,
+        help=(
+            "Batches each worker preloads ahead of consumption. "
+            "Reduce to 1 if workers are OOM-killed at large batch sizes "
+            "(each step holds prefetch_factor × num_workers × batch_size "
+            "images in /dev/shm)."
+        ),
+    )
+    parser.add_argument(
         "--max-seq-length",
         type=int,
         default=dcfg.max_seq_length,
@@ -196,6 +207,7 @@ def construct_data_config(
         max_seq_length=args.max_seq_length,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
         image_field=args.image_field,
         caption_field=args.caption_field,
     )
@@ -225,6 +237,7 @@ def build_loader(
         dataset,
         batch_size=data_config.batch_size,
         num_workers=data_config.num_workers,
+        prefetch_factor=data_config.prefetch_factor if data_config.num_workers > 0 else None,
         worker_init_fn=data_module.CC3MDataset.worker_init_fn,
         pin_memory=(device.type == "cuda"),
         # Keep workers alive between epochs — avoids re-spawning processes and
