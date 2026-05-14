@@ -461,6 +461,12 @@ def main() -> None:
         assert train_state is not None
         opt_state_dict, last_epoch = train_state
         optimizer.load_state_dict(opt_state_dict)
+        # load_state_dict restores the saved LR/weight-decay, which would
+        # silently ignore any --lr / --weight-decay passed at the command line.
+        # Override the param groups so CLI flags always win on resume.
+        for group in optimizer.param_groups:
+            group["lr"] = args.lr
+            group["weight_decay"] = args.weight_decay
         start_epoch = last_epoch + 1
         print(f"Resuming from epoch {start_epoch} ({loc})")
     else:
