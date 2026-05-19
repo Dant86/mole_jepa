@@ -30,7 +30,7 @@
 #SBATCH --qos=general
 # No GPU needed — both phases are CPU + network.
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 # Maximum allowed wall time. Phase 2 downloads are resumable — the job
 # requeues automatically via exit code 99 until the corpus is complete.
 #SBATCH --time=12:00:00

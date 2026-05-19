@@ -71,7 +71,7 @@ _DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
-_DEFAULT_IMG2DATASET_PROCESSES = 16  # img2dataset --processes_count
+_DEFAULT_IMG2DATASET_PROCESSES = 4  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
@@ -503,6 +503,62 @@ def _monitor_storage(
         time.sleep(_STORAGE_POLL_INTERVAL_S)
 
 
+def _split_parquet(parquet_path: Path, chunk_rows: int) -> list[Path]:
+    """Split a large Parquet file into row-limited chunks.
+
+    Each chunk is written to ``{parquet_path.stem}_chunk_{i:04d}.parquet``
+    in the same directory.  If the file has fewer than ``chunk_rows`` rows a
+    single-element list containing *parquet_path* is returned unchanged so the
+    caller can always iterate over the result.
+
+    img2dataset loads the entire URL-list into RAM as a pandas DataFrame.
+    For a 60 M-row file with long LLaVA captions that can approach 100–150 GB
+    of RSS.  Chunking keeps each img2dataset invocation well under the SLURM
+    memory allocation.
+
+    Args:
+        parquet_path: Path to the full filtered Parquet.
+        chunk_rows: Maximum rows per chunk.
+
+    Returns:
+        List of chunk paths in order (may be just ``[parquet_path]``).
+    """
+    import pyarrow.parquet as pq
+
+    meta = pq.read_metadata(str(parquet_path))
+    total_rows = meta.num_rows
+    if total_rows <= chunk_rows:
+        return [parquet_path]
+
+    n_chunks = (total_rows + chunk_rows - 1) // chunk_rows
+    print(
+        f"  Splitting {total_rows:,} rows into {n_chunks} chunks "
+        f"of ≤{chunk_rows:,} rows each."
+    )
+
+    pf = pq.ParquetFile(str(parquet_path))
+    chunk_paths: list[Path] = []
+    stem = parquet_path.stem
+    out_dir = parquet_path.parent
+
+    for i, batch in enumerate(pf.iter_batches(batch_size=chunk_rows)):
+        import pyarrow as pa
+
+        chunk_path = out_dir / f"{stem}_chunk_{i:04d}.parquet"
+        if not chunk_path.exists():
+            pq.write_table(
+                pa.Table.from_batches([batch]),
+                str(chunk_path),
+                compression="snappy",
+            )
+            print(f"  Wrote chunk {i:>3}/{n_chunks}: {chunk_path.name}")
+        else:
+            print(f"  Chunk {i:>3}/{n_chunks} already exists, skipping write.")
+        chunk_paths.append(chunk_path)
+
+    return chunk_paths
+
+
 def _download(
     parquet_path: Path,
     output_dir: Path,
@@ -510,6 +566,7 @@ def _download(
     processes: int,
     threads: int,
     storage_limit_gb: float,
+    chunk_rows: int,
 ) -> bool:
     """Invoke img2dataset to download and pack images from the filtered Parquet.
 
@@ -517,27 +574,26 @@ def _download(
     ViT image processor crops to 224 anyway), then packed into WebDataset
     tar shards under ``output_dir/shards/``.
 
+    Chunked loading:
+        img2dataset loads the entire URL-list into RAM at startup.  For a
+        60 M-row file with long LLaVA captions this can approach 100–150 GB
+        of RSS.  When ``chunk_rows`` is set, the parquet is pre-split into
+        smaller pieces and img2dataset is called once per chunk, writing into
+        a per-chunk sub-directory under ``shards/``.  WebDataset's recursive
+        glob picks up all sub-directories transparently at training time.
+
     Parallelism:
-        ``processes × threads`` concurrent HTTP connections.  With
-        ``processes=64`` and ``threads=64`` that is 4 096 concurrent
-        downloads — enough to saturate a 10 Gbit cluster uplink.
+        ``processes × threads`` concurrent HTTP connections.
 
     Timeout / retries:
-        ``--timeout 5`` fails dead URLs quickly (most fail in < 100 ms).
-        ``--retries 2`` handles transient network hiccups without wasting
-        time on truly dead URLs.
+        ``--timeout 5`` fails dead URLs quickly.
+        ``--retries 2`` handles transient network hiccups.
 
     Storage guard:
         A daemon thread polls the shard directory every
         ``_STORAGE_POLL_INTERVAL_S`` seconds.  When the total size of
         completed ``.tar`` files reaches ``storage_limit_gb`` GB, the
-        thread sends ``SIGTERM`` to img2dataset and exits.  This exit is
-        treated as a clean stop (not an error), so the script reports
-        success and prints the final shard count.
-
-    The ``url`` and ``caption`` columns produced by :func:`_filter` map
-    directly to img2dataset's ``url_col`` / ``caption_col``.  The ``uid``
-    column is preserved as a sidecar JSON field in every shard sample.
+        thread sends ``SIGTERM`` to img2dataset and exits.
 
     Args:
         parquet_path: Path to the filtered Parquet produced by :func:`_filter`.
@@ -546,6 +602,8 @@ def _download(
         threads: ``img2dataset --thread_count`` (per process).
         storage_limit_gb: Terminate img2dataset once this many GB of
             completed shards are written.
+        chunk_rows: Split the parquet into chunks of this many rows before
+            passing to img2dataset (reduces per-invocation RAM usage).
 
     Returns:
         ``True`` if the job was preempted (caller should exit 99),
@@ -555,44 +613,7 @@ def _download(
 
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        "img2dataset",
-        "--url_list",
-        str(parquet_path),
-        "--input_format",
-        "parquet",
-        "--url_col",
-        "url",
-        "--caption_col",
-        "caption",
-        "--output_folder",
-        str(shards_dir),
-        "--output_format",
-        "webdataset",
-        "--image_size",
-        str(_RESIZE_PX),
-        "--resize_mode",
-        "keep_ratio",
-        "--resize_only_if_bigger",
-        "True",
-        "--number_sample_per_shard",
-        str(_SHARD_SIZE),
-        "--processes_count",
-        str(processes),
-        "--thread_count",
-        str(threads),
-        "--timeout",
-        "5",
-        "--retries",
-        "2",
-        "--save_additional_columns",
-        '["uid"]',
-        "--distributor",
-        "multiprocessing",
-        "--enable_wandb",
-        "False",
-    ]
+    limit_bytes = int(storage_limit_gb * 1e9)
 
     print("\nPhase 2 — downloading images")
     print(
@@ -600,61 +621,114 @@ def _download(
         f"({processes * threads:,} concurrent connections)"
     )
     print(f"  storage limit: {storage_limit_gb:.0f} GB")
-    print("  " + " \\\n    ".join(cmd))
 
-    limit_bytes = int(storage_limit_gb * 1e9)
-    stop_event = threading.Event()
+    # Split the parquet into memory-sized chunks so that each img2dataset
+    # invocation only loads a fraction of the rows at once.  img2dataset
+    # loads the entire URL list into RAM at startup; for 60 M rows of
+    # LLaVA-recaptioned text that peaks at 100–150 GB RSS.
+    chunks = _split_parquet(parquet_path, chunk_rows)
 
-    # start_new_session isolates img2dataset in its own process group so the
-    # bash preemption handler's group-kill (kill -USR1 -- -PY_PID) only hits
-    # Python.  Python's USR1 handler then sends SIGTERM to img2dataset cleanly,
-    # letting it finish writing the current shard before exiting.
-    proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
-    _img2dataset_proc = proc  # expose to USR1 handler
-    monitor = threading.Thread(
-        target=_monitor_storage,
-        args=(shards_dir, limit_bytes, proc, stop_event),
-        daemon=True,
-    )
-    monitor.start()
+    for chunk_idx, chunk_path in enumerate(chunks):
+        if _preempt_requested.is_set():
+            break
 
-    returncode = proc.wait()
-    _img2dataset_proc = None
-    stop_event.set()  # tell the monitor thread to exit its loop
-    monitor.join(timeout=5)
+        # Each chunk gets its own sub-directory so shard numbers don't
+        # collide across chunks.  WebDataset's recursive glob sees them all.
+        chunk_shards_dir = shards_dir / f"chunk_{chunk_idx:04d}"
+        chunk_shards_dir.mkdir(parents=True, exist_ok=True)
 
-    # Preemption: USR1 handler sent SIGTERM to img2dataset before we exit.
-    # Report cleanly and tell the caller to exit 99 for requeue.
+        print(
+            f"\n  Chunk {chunk_idx + 1}/{len(chunks)}: {chunk_path.name} → "
+            f"{chunk_shards_dir}"
+        )
+
+        cmd = [
+            "img2dataset",
+            "--url_list",
+            str(chunk_path),
+            "--input_format",
+            "parquet",
+            "--url_col",
+            "url",
+            "--caption_col",
+            "caption",
+            "--output_folder",
+            str(chunk_shards_dir),
+            "--output_format",
+            "webdataset",
+            "--image_size",
+            str(_RESIZE_PX),
+            "--resize_mode",
+            "keep_ratio",
+            "--resize_only_if_bigger",
+            "True",
+            "--number_sample_per_shard",
+            str(_SHARD_SIZE),
+            "--processes_count",
+            str(processes),
+            "--thread_count",
+            str(threads),
+            "--timeout",
+            "5",
+            "--retries",
+            "2",
+            "--save_additional_columns",
+            '["uid"]',
+            "--distributor",
+            "multiprocessing",
+            "--enable_wandb",
+            "False",
+        ]
+
+        stop_event = threading.Event()
+        proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
+        _img2dataset_proc = proc
+        monitor = threading.Thread(
+            target=_monitor_storage,
+            args=(shards_dir, limit_bytes, proc, stop_event),
+            daemon=True,
+        )
+        monitor.start()
+
+        returncode = proc.wait()
+        _img2dataset_proc = None
+        stop_event.set()
+        monitor.join(timeout=5)
+
+        # Preemption: USR1 handler sent SIGTERM to img2dataset.
+        if _preempt_requested.is_set():
+            used_gb = _shards_size_gb(shards_dir)
+            print(
+                f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
+                "img2dataset will resume from the last completed shard on next run.",
+                flush=True,
+            )
+            return True  # caller exits 99
+
+        # Storage guard: SIGTERM from the monitor thread.
+        if returncode in (-15, 143):
+            used_gb = _shards_size_gb(shards_dir)
+            print(
+                f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
+                f"(limit {storage_limit_gb:.0f} GB)."
+            )
+            return False
+
+        if returncode != 0:
+            print(
+                f"\nimg2dataset exited with code {returncode}. "
+                f"Partial shards in {shards_dir} are safe to leave — "
+                "re-running resumes from the last completed shard.",
+                file=sys.stderr,
+            )
+            sys.exit(returncode)
+
+        print(f"  Chunk {chunk_idx + 1}/{len(chunks)} done.")
+
     if _preempt_requested.is_set():
-        used_gb = _shards_size_gb(shards_dir)
-        print(
-            f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
-            "img2dataset will resume from the last completed shard on next run.",
-            flush=True,
-        )
-        return True  # caller exits 99
+        return True
 
-    # SIGTERM (returncode -15 / 143) means the storage monitor fired — that's
-    # a clean, intentional stop, not an error.
-    terminated_by_monitor = returncode in (-15, 143)
-
-    if terminated_by_monitor:
-        used_gb = _shards_size_gb(shards_dir)
-        print(
-            f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
-            f"(limit {storage_limit_gb:.0f} GB)."
-        )
-    elif returncode != 0:
-        print(
-            f"\nimg2dataset exited with code {returncode}. "
-            f"Partial shards in {shards_dir} are safe to leave — "
-            "re-running resumes from the last completed shard.",
-            file=sys.stderr,
-        )
-        sys.exit(returncode)
-    else:
-        print(f"\nPhase 2 done — shards written to {shards_dir}")
-
+    print(f"\nPhase 2 done — shards written to {shards_dir}")
     return False
 
 
@@ -796,6 +870,19 @@ def main() -> None:
             "are written to disk. Prevents filling the scratch partition."
         ),
     )
+    parser.add_argument(
+        "--chunk-rows",
+        type=int,
+        default=10_000_000,
+        help=(
+            "Split filtered.parquet into chunks of this many rows before "
+            "passing to img2dataset. img2dataset loads the entire URL list "
+            "into RAM at startup; for 60 M rows of long LLaVA captions that "
+            "peaks at 100–150 GB RSS. Chunking keeps each invocation under "
+            "the SLURM memory allocation. Each chunk's shards go into a "
+            "separate sub-directory; WebDataset reads them all recursively."
+        ),
+    )
 
     # ── phase control ────────────────────────────────────────────────────────
     parser.add_argument(
@@ -873,6 +960,7 @@ def main() -> None:
         processes=args.processes,
         threads=args.threads,
         storage_limit_gb=args.storage_limit_gb,
+        chunk_rows=args.chunk_rows,
     )
 
     if preempted:
