@@ -50,6 +50,7 @@ auto-generated ``refs/convert/parquet`` branch zeros out all score columns.
 """
 
 import argparse
+import itertools
 import os
 import random
 import signal
@@ -57,7 +58,8 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as cf_wait
 from pathlib import Path
 from typing import Any
 
@@ -221,7 +223,12 @@ def _filter_shard(
             filesystem=fs,
         )
         df = table.to_pandas()
-    except Exception as exc:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
+        # Re-raise truly fatal signals; swallow everything else (including
+        # CancelledError, which is BaseException in Python ≥ 3.8 and can be
+        # raised by the HuggingFace client during a timeout retry).
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
         print(f"  WARNING: could not read {hf_path}: {exc}", file=sys.stderr)
         return hf_path, None, None, {}
 
@@ -326,10 +333,18 @@ def _filter(
     tot_after_caption = 0
     tot_after_words = 0
 
+    def _pct(a: int, b: int) -> str:
+        return f"{100 * a / b:.0f}%" if b else "n/a"
+
     writer = pq.ParquetWriter(str(tmp_path), schema, compression="snappy")
 
-    worker_args = [
-        (
+    # Build an iterator over per-shard argument tuples so we can feed the
+    # thread pool lazily (sliding-window pattern).  Submitting all futures
+    # upfront fills the executor queue; f.cancel() only works on futures that
+    # haven't been picked up yet, so workers race ahead of the main thread and
+    # run thousands of extra shards before cancellation takes effect.
+    def _make_args(shard: str) -> tuple:  # type: ignore[type-arg]
+        return (
             shard,
             hf_token,
             min_caption_words,
@@ -338,69 +353,72 @@ def _filter(
             caption_col,
             uid_col,
         )
-        for shard in shards
-    ]
+
+    shard_iter = iter(shards)
 
     preempted = False
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            futures = {pool.submit(_filter_shard, a): a[0] for a in worker_args}
-            for future in as_completed(futures):
-                # Check preemption on every completed shard.
+            # Seed the window with one future per worker.
+            in_flight: set = {
+                pool.submit(_filter_shard, _make_args(s))
+                for s in itertools.islice(shard_iter, num_workers)
+            }
+
+            while in_flight:
                 if _preempt_requested.is_set():
                     print(
                         "\n[preempt] Stopping Phase 1 early — will rerun on next job.",
                         flush=True,
                     )
-                    for f in futures:
+                    for f in in_flight:
                         f.cancel()
                     preempted = True
                     break
 
-                hf_path, df, n_scanned, stats = future.result()
-                shards_done += 1
+                # Block until at least one future completes.
+                done, in_flight = cf_wait(in_flight, return_when=FIRST_COMPLETED)
 
-                if df is None or n_scanned is None:
-                    continue
+                for future in done:
+                    shards_done += 1
 
-                scanned += int(n_scanned)
-                tot_after_url += stats.get("after_url", 0)
-                tot_after_caption += stats.get("after_caption", 0)
-                tot_after_words += stats.get("after_words", 0)
+                    if future.cancelled():
+                        continue
 
-                if accepted >= target_samples:
-                    continue  # drain remaining futures (don't write)
+                    hf_path, df, n_scanned, stats = future.result()
 
-                # Trim the shard if it would push us over the target.
-                remaining = target_samples - accepted
-                if len(df) > remaining:
-                    df = df.iloc[:remaining]
+                    # Account for the result before deciding whether to
+                    # submit the next shard so we stop as close to the
+                    # target as possible.
+                    if df is not None and n_scanned is not None:
+                        scanned += int(n_scanned)
+                        tot_after_url += stats.get("after_url", 0)
+                        tot_after_caption += stats.get("after_caption", 0)
+                        tot_after_words += stats.get("after_words", 0)
 
-                writer.write_table(pa.Table.from_pandas(df, schema=schema))
-                accepted += len(df)
+                        if accepted < target_samples:
+                            remaining = target_samples - accepted
+                            if len(df) > remaining:
+                                df = df.iloc[:remaining]
+                            writer.write_table(pa.Table.from_pandas(df, schema=schema))
+                            accepted += len(df)
 
-                pct = 100 * accepted / target_samples
-                # Print a diagnostic line every 10 shards so filter
-                # rejection rates are visible without flooding the log.
-                if shards_done % 10 == 0 or accepted >= target_samples:
+                        if shards_done % 10 == 0 or accepted >= target_samples:
+                            pct = 100 * accepted / target_samples
+                            print(
+                                f"  shard {shards_done:>5}/{len(shards):,}  "
+                                f"scanned {scanned:>10,}  "
+                                f"accepted {accepted:>8,}  ({pct:.1f}%)  "
+                                f"[pass: url {_pct(tot_after_url, scanned)}  "
+                                f"cap {_pct(tot_after_caption, scanned)}  "
+                                f"words {_pct(tot_after_words, scanned)}]"
+                            )
 
-                    def _pct(a: int, b: int) -> str:
-                        return f"{100 * a / b:.0f}%" if b else "n/a"
-
-                    print(
-                        f"  shard {shards_done:>5}/{len(shards):,}  "
-                        f"scanned {scanned:>10,}  "
-                        f"accepted {accepted:>8,}  ({pct:.1f}%)  "
-                        f"[pass: url {_pct(tot_after_url, scanned)}  "
-                        f"cap {_pct(tot_after_caption, scanned)}  "
-                        f"words {_pct(tot_after_words, scanned)}]"
-                    )
-
-                if accepted >= target_samples:
-                    # Cancel pending futures — we have enough rows.
-                    for f in futures:
-                        f.cancel()
-                    print("  target reached — cancelling remaining shards")
+                    # Only submit the next shard if we still need more rows.
+                    if accepted < target_samples and not _preempt_requested.is_set():
+                        nxt = next(shard_iter, None)
+                        if nxt is not None:
+                            in_flight.add(pool.submit(_filter_shard, _make_args(nxt)))
     finally:
         writer.close()
         if preempted:
@@ -413,7 +431,7 @@ def _filter(
     # Atomic rename: only visible as the final path once fully written.
     os.replace(tmp_path, out_path)
 
-    def _pct(a: int, b: int) -> str:
+    def _pct_final(a: int, b: int) -> str:
         return f"{100 * a / b:.1f}%" if b else "n/a"
 
     print(
@@ -423,12 +441,17 @@ def _filter(
         f"accepted: {accepted:,}"
     )
     print("Filter funnel (cumulative pass rate vs scanned):")
-    print(f"  has url       {_pct(tot_after_url, scanned):>7}  ({tot_after_url:,})")
     print(
-        f"  has caption   {_pct(tot_after_caption, scanned):>7}"
+        f"  has url       {_pct_final(tot_after_url, scanned):>7}  ({tot_after_url:,})"
+    )
+    print(
+        f"  has caption   {_pct_final(tot_after_caption, scanned):>7}"
         f"  ({tot_after_caption:,})"
     )
-    print(f"  word count    {_pct(tot_after_words, scanned):>7}  ({tot_after_words:,})")
+    print(
+        f"  word count    {_pct_final(tot_after_words, scanned):>7}"
+        f"  ({tot_after_words:,})"
+    )
     print(f"Written to {out_path}")
     return out_path
 
@@ -436,6 +459,11 @@ def _filter(
 # ---------------------------------------------------------------------------
 # Phase 2: image download via img2dataset
 # ---------------------------------------------------------------------------
+
+
+def _shards_size_gb(shards_dir: Path) -> float:
+    """Return total size in GB of all completed ``.tar`` shards."""
+    return _shards_size_gb(shards_dir)
 
 
 def _monitor_storage(
@@ -459,8 +487,8 @@ def _monitor_storage(
     """
     while not stop_event.is_set():
         # Sum only completed shards; ignore in-progress temp files.
-        used = sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file())
-        used_gb = used / 1e9
+        used_gb = _shards_size_gb(shards_dir)
+        used = int(used_gb * 1e9)
         if used >= limit_bytes:
             print(
                 f"\n[storage monitor] {used_gb:.1f} GB >= limit "
@@ -577,7 +605,11 @@ def _download(
     limit_bytes = int(storage_limit_gb * 1e9)
     stop_event = threading.Event()
 
-    proc = subprocess.Popen(cmd)  # noqa: S603
+    # start_new_session isolates img2dataset in its own process group so the
+    # bash preemption handler's group-kill (kill -USR1 -- -PY_PID) only hits
+    # Python.  Python's USR1 handler then sends SIGTERM to img2dataset cleanly,
+    # letting it finish writing the current shard before exiting.
+    proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
     _img2dataset_proc = proc  # expose to USR1 handler
     monitor = threading.Thread(
         target=_monitor_storage,
@@ -594,9 +626,7 @@ def _download(
     # Preemption: USR1 handler sent SIGTERM to img2dataset before we exit.
     # Report cleanly and tell the caller to exit 99 for requeue.
     if _preempt_requested.is_set():
-        used_gb = (
-            sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file()) / 1e9
-        )
+        used_gb = _shards_size_gb(shards_dir)
         print(
             f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
             "img2dataset will resume from the last completed shard on next run.",
@@ -609,9 +639,7 @@ def _download(
     terminated_by_monitor = returncode in (-15, 143)
 
     if terminated_by_monitor:
-        used_gb = (
-            sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file()) / 1e9
-        )
+        used_gb = _shards_size_gb(shards_dir)
         print(
             f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
             f"(limit {storage_limit_gb:.0f} GB)."
@@ -853,8 +881,8 @@ def main() -> None:
 
     # ── summary ───────────────────────────────────────────────────────────────
     shards_dir = output_dir / "shards"
-    n_shards = len(list(shards_dir.glob("*.tar")))
-    size_gb = sum(f.stat().st_size for f in shards_dir.glob("*.tar")) / 1e9
+    n_shards = len(list(shards_dir.rglob("*.tar")))
+    size_gb = _shards_size_gb(shards_dir)
     print(f"\n{'─' * 60}")
     print(f"  Shards: {n_shards:,}  ·  On disk: {size_gb:.1f} GB")
     print("\nPass to the train script:")
