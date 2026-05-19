@@ -49,6 +49,13 @@ export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
 # Prevent HuggingFace tokenizers from spawning threads before fork.
 export TOKENIZERS_PARALLELISM=false
+# Pin NumPy/SciPy/OpenBLAS to 1 thread per process.  img2dataset spawns up to
+# --processes_count worker processes, each of which imports NumPy.  Without
+# this, OpenBLAS tries to create 64 threads per worker, exhausting the per-user
+# thread limit (RLIMIT_NPROC) and causing "can't start new thread" failures.
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
 # Raise the open-file limit — img2dataset opens many sockets and tar files.
 ulimit -n 65536 2>/dev/null || true
 

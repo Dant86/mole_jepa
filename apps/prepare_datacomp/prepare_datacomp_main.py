@@ -71,7 +71,7 @@ _DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
-_DEFAULT_IMG2DATASET_PROCESSES = 64  # img2dataset --processes_count
+_DEFAULT_IMG2DATASET_PROCESSES = 16  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
@@ -771,15 +771,14 @@ def main() -> None:
     parser.add_argument("--uid-col", default=_DEFAULT_UID_COL)
 
     # ── download params ───────────────────────────────────────────────────────
-    default_procs = int(
-        os.environ.get("SLURM_CPUS_PER_TASK", _DEFAULT_IMG2DATASET_PROCESSES)
-    )
     parser.add_argument(
         "--processes",
         type=int,
-        default=default_procs,
+        default=_DEFAULT_IMG2DATASET_PROCESSES,
         help=(
-            "img2dataset --processes_count. Defaults to SLURM_CPUS_PER_TASK when set."
+            "img2dataset --processes_count. Each process spawns --threads threads, "
+            "so total concurrent connections = processes × threads. Keep low enough "
+            "that processes × threads stays within RLIMIT_NPROC headroom."
         ),
     )
     parser.add_argument(
