@@ -56,13 +56,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_DATASET_NAME = "UCSC-VLAA/Recap_DataComp_1B"
+_DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
@@ -123,42 +123,38 @@ def _install_preempt_handler() -> None:
 
 
 def _list_shards(token: str | None) -> list[str]:
-    """Return shuffled list of parquet shard paths in the dataset repo.
+    """Return shuffled list of ``hf://`` parquet URLs in the dataset repo.
 
-    Uses ``HfFileSystem`` to list files directly without downloading them.
-    Paths are shuffled so parallel workers sample diverse parts of the
-    dataset.
+    Uses ``list_repo_files`` (direct Hub API) for discovery, which takes the
+    repo ID directly and avoids any filesystem path ambiguity.  Each returned
+    path is a full ``hf://datasets/{repo}/{file}`` URL ready for
+    ``pyarrow.parquet.read_table``.
 
     Args:
         token: HuggingFace auth token (can be ``None`` for public repos).
 
     Returns:
-        Shuffled list of repo-relative parquet paths, e.g.
-        ``["data/train-00000-of-01024.parquet", ...]``.
+        Shuffled list of ``hf://`` URLs, e.g.
+        ``["hf://datasets/UCSC-VLAA/Recap-DataComp-1B/data/train-00000.parquet", ...]``.
     """
-    from huggingface_hub import HfFileSystem
+    from huggingface_hub import list_repo_files
 
-    fs = HfFileSystem(token=token)
-    # HfFileSystem.ls stubs type the return as list[str | dict] regardless of
-    # the detail= flag; cast to the concrete type we requested.
-    all_files: list[str] = cast(
-        list[str], fs.ls(f"datasets/{_DATASET_NAME}", detail=False)
+    all_files = list(
+        list_repo_files(
+            _DATASET_NAME,
+            repo_type="dataset",
+            token=token,
+        )
     )
-    # Recurse into subdirectories (common layout: data/*.parquet)
-    parquet_paths: list[str] = []
-    for entry in all_files:
-        if entry.endswith(".parquet"):
-            parquet_paths.append(entry)
-        else:
-            try:
-                sub: list[str] = cast(list[str], fs.ls(entry, detail=False))
-                parquet_paths.extend(p for p in sub if p.endswith(".parquet"))
-            except Exception:  # noqa: BLE001
-                pass
+    parquet_paths = [
+        f"hf://datasets/{_DATASET_NAME}/{f}"
+        for f in all_files
+        if f.endswith(".parquet")
+    ]
 
     if not parquet_paths:
         raise RuntimeError(
-            f"No parquet files found under datasets/{_DATASET_NAME}. "
+            f"No parquet files found in {_DATASET_NAME}. "
             "Run with --list-columns to inspect the repo structure."
         )
 
@@ -212,6 +208,9 @@ def _filter_shard(
     ) = args
 
     try:
+        # hf_path is a full hf://datasets/... URL; pyarrow resolves it via
+        # fsspec + huggingface_hub.  Pass an explicit HfFileSystem so the
+        # auth token is forwarded to every request.
         fs = HfFileSystem(token=token)
         table = pq.read_table(
             hf_path,
@@ -605,42 +604,27 @@ def _download(
 
 def _list_columns(hf_token: str | None) -> None:
     """Print repo structure and column names from the first shard, then exit."""
-    from huggingface_hub import HfFileSystem
+    import pyarrow.parquet as pq
+    from huggingface_hub import HfFileSystem, list_repo_files
 
-    fs = HfFileSystem(token=hf_token)
-    print(f"Listing top-level entries in datasets/{_DATASET_NAME}:")
-    top: list[dict[str, Any]] = cast(
-        list[dict[str, Any]],
-        fs.ls(f"datasets/{_DATASET_NAME}", detail=True),
+    print(f"Files in {_DATASET_NAME}:")
+    all_files = list(
+        list_repo_files(_DATASET_NAME, repo_type="dataset", token=hf_token)
     )
-    for entry in top[:20]:
-        print(f"  {entry.get('type', '?'):6s}  {entry.get('name', '?')}")
+    for f in all_files[:20]:
+        print(f"  {f}")
+    if len(all_files) > 20:
+        print(f"  ... ({len(all_files)} total)")
 
-    # Find first parquet and sample one row.
-    parquet_files: list[str] = [
-        str(e["name"]) for e in top if str(e.get("name", "")).endswith(".parquet")
-    ]
-    if not parquet_files:
-        for entry in top:
-            try:
-                sub: list[str] = cast(
-                    list[str], fs.ls(str(entry["name"]), detail=False)
-                )
-                parquet_files = [p for p in sub if p.endswith(".parquet")]
-                if parquet_files:
-                    break
-            except Exception:  # noqa: BLE001
-                pass
-
+    parquet_files = [f for f in all_files if f.endswith(".parquet")]
     if not parquet_files:
         print("\nNo parquet files found — check repo structure above.")
         return
 
-    import pyarrow.parquet as pq
-
-    sample_path = parquet_files[0]
-    print(f"\nSampling first row from {sample_path}:")
-    schema = pq.read_schema(sample_path, filesystem=fs)
+    sample_url = f"hf://datasets/{_DATASET_NAME}/{parquet_files[0]}"
+    print(f"\nSampling schema from {sample_url}:")
+    fs = HfFileSystem(token=hf_token)
+    schema = pq.read_schema(sample_url, filesystem=fs)
     print("\nColumn names:")
     for name in schema.names:
         print(f"  {name!r}")
