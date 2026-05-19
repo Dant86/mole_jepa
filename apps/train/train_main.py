@@ -18,7 +18,7 @@ import torch.utils.data
 
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
-from mole_jepa import factory, losses, model_io, models, registry
+from mole_jepa import factory, losses, model_io, models, nfs_registry
 
 _STATS_FILE = "stats.jsonl"
 
@@ -38,22 +38,33 @@ def parse_args() -> argparse.Namespace:
         A :class:`Namespace` object.
     """
     dcfg = config_module.DataConfig()
-    valid_configs = ", ".join(sorted(registry.CONFIGS))
     parser = argparse.ArgumentParser()
 
-    # ── model ─────────────────────────────────────────────────────────────────
+    # ── model / registry ──────────────────────────────────────────────────────
     parser.add_argument(
         "--config",
         required=True,
         metavar="NAME",
-        help=f"Named model config from the registry. One of: {valid_configs}.",
+        help="Named model config looked up in the NFS registry.",
+    )
+    parser.add_argument(
+        "--registry-path",
+        default=os.environ.get("REGISTRY_PATH"),
+        metavar="DIR",
+        help=(
+            "Directory containing registry.json. "
+            "Defaults to $REGISTRY_PATH from the environment."
+        ),
     )
 
     # ── training ──────────────────────────────────────────────────────────────
     parser.add_argument(
         "--checkpoint-dir",
-        required=True,
-        help="Directory from which to read/write model checkpoints.",
+        default=None,
+        help=(
+            "Override the checkpoint directory from the registry. "
+            "If omitted, the path stored in the registry entry is used."
+        ),
     )
     parser.add_argument(
         "--num-epochs",
@@ -167,22 +178,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_model_config(args: argparse.Namespace) -> config_module.ModelConfig:
-    """Resolve a named config from the registry.
+def resolve_entry(
+    args: argparse.Namespace,
+) -> tuple[config_module.ModelConfig, pathlib.Path]:
+    """Resolve the model config and checkpoint directory from the NFS registry.
+
+    The checkpoint directory comes from the registry entry unless
+    ``--checkpoint-dir`` is explicitly provided on the command line.
 
     Args:
-        args: Parsed CLI arguments (must include ``args.config``).
+        args: Parsed CLI arguments (must include ``args.config``,
+            ``args.registry_path``, and optionally ``args.checkpoint_dir``).
 
     Returns:
-        The :class:`~mole_jepa.config.ModelConfig` registered under that name.
+        ``(model_config, checkpoint_dir)`` tuple.
 
     Raises:
-        SystemExit: If ``args.config`` is not a registered name.
+        SystemExit: If ``args.registry_path`` is unset, or if ``args.config``
+            is not found in the registry.
     """
-    if args.config not in registry.CONFIGS:
-        valid = ", ".join(sorted(registry.CONFIGS))
-        raise SystemExit(f"Unknown config '{args.config}'. Valid configs: {valid}")
-    return registry.CONFIGS[args.config]
+    if not args.registry_path:
+        raise SystemExit(
+            "No registry path set. "
+            "Pass --registry-path or set $REGISTRY_PATH in your environment."
+        )
+    try:
+        entry = nfs_registry.get_entry(args.config, args.registry_path)
+    except KeyError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    checkpoint_dir = (
+        pathlib.Path(args.checkpoint_dir)
+        if args.checkpoint_dir
+        else entry.checkpoint_dir
+    )
+    return entry.config, checkpoint_dir
 
 
 def construct_data_config(
@@ -444,14 +474,14 @@ def main() -> None:
     device = _get_device()
     print(f"device: {device}")
 
-    model_config = resolve_model_config(args)
+    model_config, checkpoint_dir = resolve_entry(args)
     data_config = construct_data_config(args, model_config)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"config: {args.config}")
+    print(f"config:         {args.config}")
+    print(f"checkpoint_dir: {checkpoint_dir}")
     for field in dataclasses.fields(model_config):
         print(f"  {field.name} = {getattr(model_config, field.name)!r}")
-
-    loc = model_io.model_dir(args.checkpoint_dir, model_config)
 
     # Build DataLoaders before moving the model to CUDA.  Workers are forked
     # at first iteration, so creating them here ensures they don't inherit the
@@ -478,16 +508,15 @@ def main() -> None:
     )
 
     # ── resume detection ──────────────────────────────────────────────────────
-    # Auto-resume if a train state for this exact config hash exists.
-    # A changed hyperparameter → different hash → fresh run automatically.
-    resuming = model_io.has_train_state(model_config, args.checkpoint_dir)
+    # Auto-resume if a train state exists in the registry-resolved directory.
+    # The path comes from the registry entry, so it is stable across config
+    # field additions (no hash recomputation at resume time).
+    resuming = model_io.has_train_state_at(checkpoint_dir)
 
     start_epoch = 0
     if resuming:
-        model_io.load_model_weights(
-            model, model_config, args.checkpoint_dir, map_location=device
-        )
-        train_state = model_io.load_train_state(model_config, args.checkpoint_dir)
+        model_io.load_model_weights_at(model, checkpoint_dir, map_location=device)
+        train_state = model_io.load_train_state_at(checkpoint_dir)
         assert train_state is not None
         opt_state_dict, last_epoch = train_state
         optimizer.load_state_dict(opt_state_dict)
@@ -498,9 +527,9 @@ def main() -> None:
             group["lr"] = args.lr
             group["weight_decay"] = args.weight_decay
         start_epoch = last_epoch + 1
-        print(f"Resuming from epoch {start_epoch} ({loc})")
+        print(f"Resuming from epoch {start_epoch}")
     else:
-        print(f"Starting fresh run ({loc})")
+        print("Starting fresh run")
 
     # ── preemption handler ────────────────────────────────────────────────────
     # On the DSI cluster, preemption sends SIGUSR1 with a 5-minute grace period
@@ -510,10 +539,8 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        model_io.save_model(model, model_config, args.checkpoint_dir)
-        model_io.save_train_state(
-            optimizer, current_epoch, model_config, args.checkpoint_dir
-        )
+        model_io.save_model_at(model, checkpoint_dir, config=model_config)
+        model_io.save_train_state_at(optimizer, current_epoch, checkpoint_dir)
         # Explicitly tear down DataLoader workers before exiting.  If we call
         # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
         # worker processes are orphaned and Python's multiprocessing resource
@@ -530,7 +557,7 @@ def main() -> None:
     # ── stats file ────────────────────────────────────────────────────────────
     # Truncate on a fresh run; on resume, keep history and continue appending.
     if not resuming:
-        (loc / _STATS_FILE).unlink(missing_ok=True)
+        (checkpoint_dir / _STATS_FILE).unlink(missing_ok=True)
 
     # ── training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.num_epochs):
@@ -561,15 +588,17 @@ def main() -> None:
                 max_batches=args.max_batches,
             )
 
-        log_stats(loc, epoch, train_stats, train_batches, val_stats, val_batches)
-        model_io.save_model(model, model_config, args.checkpoint_dir)
-        model_io.save_train_state(optimizer, epoch, model_config, args.checkpoint_dir)
+        log_stats(
+            checkpoint_dir, epoch, train_stats, train_batches, val_stats, val_batches
+        )
+        model_io.save_model_at(model, checkpoint_dir, config=model_config)
+        model_io.save_train_state_at(optimizer, epoch, checkpoint_dir)
 
     # Training completed successfully.
     # Save the final model weights, then remove the ephemeral train state —
     # it is only needed for resumption and is no longer useful.
-    model_io.save_model(model, model_config, args.checkpoint_dir)
-    model_io.cleanup_train_state(model_config, args.checkpoint_dir)
+    model_io.save_model_at(model, checkpoint_dir, config=model_config)
+    model_io.cleanup_train_state_at(checkpoint_dir)
 
 
 if __name__ == "__main__":

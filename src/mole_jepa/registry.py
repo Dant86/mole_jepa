@@ -1,4 +1,18 @@
-"""Named model configurations for MoLeJEPA experiments.
+r"""Named model configurations for MoLeJEPA experiments.
+
+.. deprecated::
+    This module is superseded by the NFS registry in
+    :mod:`mole_jepa.nfs_registry`.  Run the one-time import tool to migrate::
+
+        uv run python apps/registry/import_from_registry_py.py \\
+            --checkpoint-base $CHECKPOINT_DIR \\
+            --registry-path   $REGISTRY_PATH
+
+    After verifying the import with ``apps/registry/register.py --list``,
+    delete this file and remove the ``registry`` import from
+    ``apps/train/train_main.py``.
+
+----
 
 Add a new entry to :data:`CONFIGS` to register a configuration. The key
 becomes the value passed to ``--config`` at training time and can also be

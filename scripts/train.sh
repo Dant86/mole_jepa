@@ -64,7 +64,12 @@ uv sync
 # `kill -- -$PY_PID` can signal the whole group if needed (e.g. if train_main
 # ever spawns workers). The PID and PGID are identical for a setsid child.
 #
-# Resume is auto-detected inside train_main.py based on the config hash.
+# Pass --config NAME via "$@" at sbatch time, e.g.:
+#   sbatch scripts/train.sh --config vit_base_bert_jepa_frozen
+#
+# The checkpoint directory is resolved from the NFS registry entry for NAME —
+# no --checkpoint-dir flag is required.  Override with --checkpoint-dir if
+# you need to redirect a run to a different path.
 PY_PID=""
 
 on_preempt() {
@@ -91,7 +96,7 @@ trap on_preempt USR1
 trap on_term TERM
 
 setsid uv run python apps/train/train_main.py \
-    --checkpoint-dir       "${CHECKPOINT_DIR}" \
+    --registry-path        "${REGISTRY_PATH}" \
     --num-epochs           100 \
     --lr                   1e-4 \
     --weight-decay         1e-4 \

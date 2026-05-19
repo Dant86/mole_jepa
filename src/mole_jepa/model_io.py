@@ -251,6 +251,127 @@ def cleanup_train_state(
     (model_dir(root, config) / _TRAIN_STATE_FILE).unlink(missing_ok=True)
 
 
+# ── explicit-path variants ────────────────────────────────────────────────────
+# These functions accept a direct ``checkpoint_dir`` (the exact directory
+# containing model.pt / train_state.pt) instead of ``(root, config)``.
+# They are used by the training script when the checkpoint path is resolved
+# from the NFS registry rather than derived from the config hash at runtime.
+# The original ``(root, config)`` functions remain available for notebook use.
+
+
+def save_model_at(
+    model: models.MoLeJEPA,
+    checkpoint_dir: str | pathlib.Path,
+    config: config_module.ModelConfig | None = None,
+) -> None:
+    """Save model weights (and optionally config) to an explicit directory.
+
+    Writes ``model.pt`` atomically via a temp-file rename.  If *config* is
+    provided and ``config.json`` does not yet exist, it is written alongside.
+
+    Args:
+        model: The model whose weights to persist.
+        checkpoint_dir: Directory to write into (created if absent).
+        config: If given, serialised to ``config.json`` on first save.
+    """
+    loc = pathlib.Path(checkpoint_dir)
+    os.makedirs(loc, exist_ok=True)
+    if config is not None:
+        config_path = loc / _CONFIG_FILE
+        if not config_path.exists():
+            config_path.write_text(json.dumps(dataclasses.asdict(config), indent=2))
+    tmp = loc / (_MODEL_FILE + ".tmp")
+    torch.save(model.state_dict(), tmp)
+    os.replace(tmp, loc / _MODEL_FILE)
+
+
+def load_model_weights_at(
+    model: models.MoLeJEPA,
+    checkpoint_dir: str | pathlib.Path,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> None:
+    """Load saved weights into an already-constructed model in-place.
+
+    Args:
+        model: Model instance to load weights into.
+        checkpoint_dir: Directory containing ``model.pt``.
+        map_location: Device to load tensors onto.
+
+    Raises:
+        FileNotFoundError: If ``model.pt`` does not exist.
+    """
+    model_path = pathlib.Path(checkpoint_dir) / _MODEL_FILE
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"No saved model found at {model_path}. "
+            "Run training first, or check the checkpoint directory."
+        )
+    state_dict: dict[str, Any] = torch.load(
+        model_path, map_location=map_location, weights_only=True
+    )
+    model.load_state_dict(state_dict)
+
+
+def save_train_state_at(
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    checkpoint_dir: str | pathlib.Path,
+) -> None:
+    """Save optimizer state and epoch to an explicit directory (atomic).
+
+    Args:
+        optimizer: Optimizer whose state to persist.
+        epoch: Most recently completed epoch (0-indexed).
+        checkpoint_dir: Directory to write into (created if absent).
+    """
+    loc = pathlib.Path(checkpoint_dir)
+    os.makedirs(loc, exist_ok=True)
+    tmp = loc / (_TRAIN_STATE_FILE + ".tmp")
+    torch.save(
+        {"epoch": epoch, "optimizer_state_dict": optimizer.state_dict()},
+        tmp,
+    )
+    os.replace(tmp, loc / _TRAIN_STATE_FILE)
+
+
+def load_train_state_at(
+    checkpoint_dir: str | pathlib.Path,
+) -> tuple[dict[str, Any], int] | None:
+    """Load optimizer state and epoch from an explicit directory.
+
+    Args:
+        checkpoint_dir: Directory containing ``train_state.pt``.
+
+    Returns:
+        ``(optimizer_state_dict, epoch)`` if a train state file exists,
+        ``None`` otherwise.
+    """
+    path = pathlib.Path(checkpoint_dir) / _TRAIN_STATE_FILE
+    if not path.exists():
+        return None
+    state: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=True)
+    return state["optimizer_state_dict"], state["epoch"]
+
+
+def has_train_state_at(checkpoint_dir: str | pathlib.Path) -> bool:
+    """Return ``True`` if ``train_state.pt`` exists in *checkpoint_dir*.
+
+    Args:
+        checkpoint_dir: Directory to check.
+    """
+    return (pathlib.Path(checkpoint_dir) / _TRAIN_STATE_FILE).exists()
+
+
+def cleanup_train_state_at(checkpoint_dir: str | pathlib.Path) -> None:
+    """Remove ``train_state.pt`` from *checkpoint_dir* (safe if absent).
+
+    Args:
+        checkpoint_dir: Directory whose train state to remove.
+    """
+    (pathlib.Path(checkpoint_dir) / _TRAIN_STATE_FILE).unlink(missing_ok=True)
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 
