@@ -221,7 +221,12 @@ def _filter_shard(
             filesystem=fs,
         )
         df = table.to_pandas()
-    except Exception as exc:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
+        # Re-raise truly fatal signals; swallow everything else (including
+        # CancelledError, which is BaseException in Python ≥ 3.8 and can be
+        # raised by the HuggingFace client during a timeout retry).
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
         print(f"  WARNING: could not read {hf_path}: {exc}", file=sys.stderr)
         return hf_path, None, None, {}
 
@@ -356,6 +361,10 @@ def _filter(
                         f.cancel()
                     preempted = True
                     break
+
+                if future.cancelled():
+                    shards_done += 1
+                    continue
 
                 hf_path, df, n_scanned, stats = future.result()
                 shards_done += 1
