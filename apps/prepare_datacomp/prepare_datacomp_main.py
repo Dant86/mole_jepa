@@ -62,7 +62,7 @@ from typing import Any, cast
 # Constants
 # ---------------------------------------------------------------------------
 
-_DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
+_DATASET_NAME = "UCSC-VLAA/Recap_DataComp_1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
