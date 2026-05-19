@@ -71,7 +71,7 @@ _DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
-_DEFAULT_IMG2DATASET_PROCESSES = 32  # img2dataset --processes_count
+_DEFAULT_IMG2DATASET_PROCESSES = 16  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 128  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
@@ -789,12 +789,14 @@ def _download(
                         f"(limit {storage_limit_gb:.0f} GB)."
                     )
                     return False
-                # Watchdog killed it — restart for the same chunk.
+                # Watchdog killed it — brief pause so the old process group
+                # fully cleans up before we spawn fresh workers.
                 print(
                     f"\n[watchdog] Restarting img2dataset for chunk "
-                    f"{chunk_idx + 1}/{len(chunks)}.",
+                    f"{chunk_idx + 1}/{len(chunks)} in 30s.",
                     flush=True,
                 )
+                time.sleep(30)
                 continue  # retry this chunk
 
             if returncode != 0:
