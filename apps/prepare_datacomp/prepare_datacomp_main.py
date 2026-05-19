@@ -756,12 +756,12 @@ def main() -> None:
     parser.add_argument(
         "--clip-threshold",
         type=float,
-        default=0.2,
+        default=0.0,
         help=(
-            "Minimum re_clip_score (image vs recaption CLIP similarity). "
-            "The main-branch parquet files have real scores; 0.2 is a "
-            "reasonable floor for LLaVA-style verbose recaptions. "
-            "Set to 0.0 to disable."
+            "Minimum re_clip_score. Disabled (0.0) by default: re_clip_score "
+            "is 0.0 for every row in all train shards of this dataset — only "
+            "the tiny preview shard (used by the HF viewer) has real values. "
+            "Set to a positive value if a future dataset version populates it."
         ),
     )
     parser.add_argument(
