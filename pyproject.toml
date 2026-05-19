@@ -31,6 +31,12 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.11",
 ]
+data = [
+    # Used by prepare_datacomp: metadata filtering and image download.
+    "img2dataset>=1.41",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
