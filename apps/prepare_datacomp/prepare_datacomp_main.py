@@ -50,6 +50,7 @@ auto-generated ``refs/convert/parquet`` branch zeros out all score columns.
 """
 
 import argparse
+import itertools
 import os
 import random
 import signal
@@ -57,7 +58,8 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as cf_wait
 from pathlib import Path
 from typing import Any
 
@@ -331,10 +333,18 @@ def _filter(
     tot_after_caption = 0
     tot_after_words = 0
 
+    def _pct(a: int, b: int) -> str:
+        return f"{100 * a / b:.0f}%" if b else "n/a"
+
     writer = pq.ParquetWriter(str(tmp_path), schema, compression="snappy")
 
-    worker_args = [
-        (
+    # Build an iterator over per-shard argument tuples so we can feed the
+    # thread pool lazily (sliding-window pattern).  Submitting all futures
+    # upfront fills the executor queue; f.cancel() only works on futures that
+    # haven't been picked up yet, so workers race ahead of the main thread and
+    # run thousands of extra shards before cancellation takes effect.
+    def _make_args(shard: str) -> tuple:  # type: ignore[type-arg]
+        return (
             shard,
             hf_token,
             min_caption_words,
@@ -343,73 +353,72 @@ def _filter(
             caption_col,
             uid_col,
         )
-        for shard in shards
-    ]
+
+    shard_iter = iter(shards)
 
     preempted = False
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            futures = {pool.submit(_filter_shard, a): a[0] for a in worker_args}
-            for future in as_completed(futures):
-                # Check preemption on every completed shard.
+            # Seed the window with one future per worker.
+            in_flight: set = {
+                pool.submit(_filter_shard, _make_args(s))
+                for s in itertools.islice(shard_iter, num_workers)
+            }
+
+            while in_flight:
                 if _preempt_requested.is_set():
                     print(
                         "\n[preempt] Stopping Phase 1 early — will rerun on next job.",
                         flush=True,
                     )
-                    for f in futures:
+                    for f in in_flight:
                         f.cancel()
                     preempted = True
                     break
 
-                if future.cancelled():
+                # Block until at least one future completes.
+                done, in_flight = cf_wait(in_flight, return_when=FIRST_COMPLETED)
+
+                for future in done:
                     shards_done += 1
-                    continue
 
-                hf_path, df, n_scanned, stats = future.result()
-                shards_done += 1
+                    if future.cancelled():
+                        continue
 
-                if df is None or n_scanned is None:
-                    continue
+                    hf_path, df, n_scanned, stats = future.result()
 
-                scanned += int(n_scanned)
-                tot_after_url += stats.get("after_url", 0)
-                tot_after_caption += stats.get("after_caption", 0)
-                tot_after_words += stats.get("after_words", 0)
+                    # Account for the result before deciding whether to
+                    # submit the next shard so we stop as close to the
+                    # target as possible.
+                    if df is not None and n_scanned is not None:
+                        scanned += int(n_scanned)
+                        tot_after_url += stats.get("after_url", 0)
+                        tot_after_caption += stats.get("after_caption", 0)
+                        tot_after_words += stats.get("after_words", 0)
 
-                if accepted >= target_samples:
-                    continue  # drain remaining futures (don't write)
+                        if accepted < target_samples:
+                            remaining = target_samples - accepted
+                            if len(df) > remaining:
+                                df = df.iloc[:remaining]
+                            writer.write_table(pa.Table.from_pandas(df, schema=schema))
+                            accepted += len(df)
 
-                # Trim the shard if it would push us over the target.
-                remaining = target_samples - accepted
-                if len(df) > remaining:
-                    df = df.iloc[:remaining]
+                        if shards_done % 10 == 0 or accepted >= target_samples:
+                            pct = 100 * accepted / target_samples
+                            print(
+                                f"  shard {shards_done:>5}/{len(shards):,}  "
+                                f"scanned {scanned:>10,}  "
+                                f"accepted {accepted:>8,}  ({pct:.1f}%)  "
+                                f"[pass: url {_pct(tot_after_url, scanned)}  "
+                                f"cap {_pct(tot_after_caption, scanned)}  "
+                                f"words {_pct(tot_after_words, scanned)}]"
+                            )
 
-                writer.write_table(pa.Table.from_pandas(df, schema=schema))
-                accepted += len(df)
-
-                pct = 100 * accepted / target_samples
-                # Print a diagnostic line every 10 shards so filter
-                # rejection rates are visible without flooding the log.
-                if shards_done % 10 == 0 or accepted >= target_samples:
-
-                    def _pct(a: int, b: int) -> str:
-                        return f"{100 * a / b:.0f}%" if b else "n/a"
-
-                    print(
-                        f"  shard {shards_done:>5}/{len(shards):,}  "
-                        f"scanned {scanned:>10,}  "
-                        f"accepted {accepted:>8,}  ({pct:.1f}%)  "
-                        f"[pass: url {_pct(tot_after_url, scanned)}  "
-                        f"cap {_pct(tot_after_caption, scanned)}  "
-                        f"words {_pct(tot_after_words, scanned)}]"
-                    )
-
-                if accepted >= target_samples:
-                    # Cancel pending futures — we have enough rows.
-                    for f in futures:
-                        f.cancel()
-                    print("  target reached — cancelling remaining shards")
+                    # Only submit the next shard if we still need more rows.
+                    if accepted < target_samples and not _preempt_requested.is_set():
+                        nxt = next(shard_iter, None)
+                        if nxt is not None:
+                            in_flight.add(pool.submit(_filter_shard, _make_args(nxt)))
     finally:
         writer.close()
         if preempted:
@@ -422,7 +431,7 @@ def _filter(
     # Atomic rename: only visible as the final path once fully written.
     os.replace(tmp_path, out_path)
 
-    def _pct(a: int, b: int) -> str:
+    def _pct_final(a: int, b: int) -> str:
         return f"{100 * a / b:.1f}%" if b else "n/a"
 
     print(
@@ -432,12 +441,17 @@ def _filter(
         f"accepted: {accepted:,}"
     )
     print("Filter funnel (cumulative pass rate vs scanned):")
-    print(f"  has url       {_pct(tot_after_url, scanned):>7}  ({tot_after_url:,})")
     print(
-        f"  has caption   {_pct(tot_after_caption, scanned):>7}"
+        f"  has url       {_pct_final(tot_after_url, scanned):>7}  ({tot_after_url:,})"
+    )
+    print(
+        f"  has caption   {_pct_final(tot_after_caption, scanned):>7}"
         f"  ({tot_after_caption:,})"
     )
-    print(f"  word count    {_pct(tot_after_words, scanned):>7}  ({tot_after_words:,})")
+    print(
+        f"  word count    {_pct_final(tot_after_words, scanned):>7}"
+        f"  ({tot_after_words:,})"
+    )
     print(f"Written to {out_path}")
     return out_path
 
