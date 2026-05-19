@@ -2,14 +2,21 @@ r"""Filter Recap-DataComp-1B metadata and download images as WebDataset shards.
 
 Two-phase pipeline:
 
-1. **Filter** — stream ``mlfoundations/recap-datacomp-1b`` from HuggingFace,
-   apply quality filters (CLIP score + re-caption length), and write a
-   filtered Parquet file to ``{output_dir}/filtered.parquet``.  Scanning
-   stops once ``--target-samples`` accepted rows are collected.
+1. **Filter** — list all parquet shards in ``mlfoundations/recap-datacomp-1b``
+   via ``HfFileSystem``, read only the required columns (no full-file
+   download), apply quality filters (CLIP score + re-caption length), and
+   write a filtered Parquet to ``{output_dir}/filtered.parquet``.
+   *N* shards are processed in parallel with a ``ThreadPoolExecutor``,
+   which is I/O-bound (network reads) and releases the GIL for pandas work.
 
 2. **Download** — invoke ``img2dataset`` on the filtered Parquet to fetch,
    resize (shorter edge → 256 px), and pack images into WebDataset tar
    shards under ``{output_dir}/shards/``.
+
+Performance targets (single H200 node, 64 CPUs):
+    Phase 1  ~30–90 min   (depends on HF network speed and shard count)
+    Phase 2  ~8–18 h      (40 M × 25 KB, 4 096 concurrent connections)
+    Total    fits overnight for a ~40 M image corpus
 
 Resuming:
     Re-running skips Phase 1 when ``filtered.parquet`` already exists
@@ -19,11 +26,17 @@ Resuming:
 Storage estimate:
     40 M images × ~25 KB (256 px JPEG, q=85) ≈ 1 TB.
 
+URL mortality:
+    DataComp URLs can go dead after dataset creation.  The default
+    ``--target-samples`` of 60 M over-samples so that ~40 M images are
+    recovered even with 30 % URL mortality.  Tune with ``--target-samples``
+    if you have a sense of the current dead-URL rate.
+
 Usage::
 
     uv run --group data python apps/prepare_datacomp/prepare_datacomp_main.py \
         --output-dir /scratch/vpathak/datacomp \
-        --target-samples 40_000_000
+        --target-samples 60_000_000
 
 Column names (run with --list-columns to inspect the first row)::
 
@@ -34,20 +47,23 @@ Column names (run with --list-columns to inspect the first row)::
 """
 
 import argparse
+import random
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, cast
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _DATASET_NAME = "mlfoundations/recap-datacomp-1b"
-_SHARD_SIZE = 5_000  # images per WebDataset tar shard
+_SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
-_BATCH_SIZE = 100_000  # rows collected per pyarrow write batch
-_DEFAULT_PROCESSES = 16  # img2dataset --processes_count
-_DEFAULT_THREADS = 64  # img2dataset --thread_count (per process)
+_DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
+_DEFAULT_IMG2DATASET_PROCESSES = 64  # img2dataset --processes_count
+_DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 
 # Default column names in mlfoundations/recap-datacomp-1b.
 _DEFAULT_URL_COL = "url"
@@ -57,8 +73,128 @@ _DEFAULT_UID_COL = "uid"
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: metadata filter
+# Phase 1 helpers
 # ---------------------------------------------------------------------------
+
+
+def _list_shards(token: str | None) -> list[str]:
+    """Return shuffled list of parquet shard paths in the dataset repo.
+
+    Uses ``HfFileSystem`` to list files directly without downloading them.
+    Paths are shuffled so parallel workers sample diverse parts of the
+    dataset.
+
+    Args:
+        token: HuggingFace auth token (can be ``None`` for public repos).
+
+    Returns:
+        Shuffled list of repo-relative parquet paths, e.g.
+        ``["data/train-00000-of-01024.parquet", ...]``.
+    """
+    from huggingface_hub import HfFileSystem
+
+    fs = HfFileSystem(token=token)
+    # HfFileSystem.ls stubs type the return as list[str | dict] regardless of
+    # the detail= flag; cast to the concrete type we requested.
+    all_files: list[str] = cast(
+        list[str], fs.ls(f"datasets/{_DATASET_NAME}", detail=False)
+    )
+    # Recurse into subdirectories (common layout: data/*.parquet)
+    parquet_paths: list[str] = []
+    for entry in all_files:
+        if entry.endswith(".parquet"):
+            parquet_paths.append(entry)
+        else:
+            try:
+                sub: list[str] = cast(list[str], fs.ls(entry, detail=False))
+                parquet_paths.extend(p for p in sub if p.endswith(".parquet"))
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not parquet_paths:
+        raise RuntimeError(
+            f"No parquet files found under datasets/{_DATASET_NAME}. "
+            "Run with --list-columns to inspect the repo structure."
+        )
+
+    random.seed(42)
+    random.shuffle(parquet_paths)
+    return parquet_paths
+
+
+def _filter_shard(
+    args: tuple[
+        str,  # hf_path  — full HfFileSystem path to the parquet shard
+        str | None,  # token
+        float,  # clip_threshold
+        int,  # min_caption_words
+        int,  # max_caption_words
+        str,  # url_col
+        str,  # caption_col
+        str,  # clip_col
+        str,  # uid_col
+    ],
+) -> tuple[str, Any, Any]:
+    """Read one parquet shard, apply quality filters, return accepted rows.
+
+    This function runs inside a ``ThreadPoolExecutor`` worker thread.
+    ``HfFileSystem`` I/O releases the GIL, so multiple workers make
+    genuine progress in parallel.
+
+    Args:
+        args: Packed tuple of all parameters (required for
+            ``ThreadPoolExecutor.submit``).
+
+    Returns:
+        ``(hf_path, filtered_df, n_scanned)`` on success, or
+        ``(hf_path, None, None)`` if the shard could not be read.
+        The second element is a ``pandas.DataFrame`` or ``None``;
+        typed as ``Any`` to avoid a top-level pandas import.
+    """
+    import pyarrow.parquet as pq
+    from huggingface_hub import HfFileSystem
+
+    (
+        hf_path,
+        token,
+        clip_threshold,
+        min_words,
+        max_words,
+        url_col,
+        caption_col,
+        clip_col,
+        uid_col,
+    ) = args
+
+    try:
+        fs = HfFileSystem(token=token)
+        table = pq.read_table(
+            hf_path,
+            columns=[url_col, caption_col, clip_col, uid_col],
+            filesystem=fs,
+        )
+        df = table.to_pandas()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARNING: could not read {hf_path}: {exc}", file=sys.stderr)
+        return hf_path, None, None
+
+    n_scanned = len(df)
+
+    # ── quality filters ───────────────────────────────────────────────────
+    mask = df[url_col].notna() & (df[url_col] != "")
+    mask &= df[caption_col].notna() & (df[caption_col] != "")
+    mask &= df[clip_col].notna() & (df[clip_col].astype(float) >= clip_threshold)
+    df = df[mask]
+
+    word_counts = df[caption_col].str.split().str.len()
+    df = df[(word_counts >= min_words) & (word_counts <= max_words)]
+
+    # Normalise column names for img2dataset / downstream use.
+    df = df[[url_col, caption_col, uid_col]].rename(
+        columns={caption_col: "caption", uid_col: "uid", url_col: "url"}
+    )
+
+    return hf_path, df, n_scanned
 
 
 def _filter(
@@ -72,10 +208,18 @@ def _filter(
     caption_col: str,
     clip_col: str,
     uid_col: str,
-    shuffle_buffer: int,
+    num_workers: int,
     hf_token: str | None,
 ) -> Path:
-    """Stream Recap-DataComp-1B, filter, and write a Parquet of accepted rows.
+    """Stream Recap-DataComp-1B shards in parallel, filter, write Parquet.
+
+    Shards are listed from the HuggingFace repo, shuffled for diversity,
+    then dispatched to a ``ThreadPoolExecutor``.  Each worker reads only
+    the required columns directly from HF (no full-shard download to disk),
+    applies pandas-based quality filters, and returns the accepted rows.
+    Results are written to ``{output_dir}/filtered.parquet`` in batches as
+    workers complete.  Scanning stops once ``target_samples`` rows have been
+    accepted.
 
     Args:
         output_dir: Directory in which to write ``filtered.parquet``.
@@ -83,36 +227,29 @@ def _filter(
         clip_threshold: Minimum CLIP ViT-L/14 score.
         min_caption_words: Reject captions shorter than this many words.
         max_caption_words: Reject captions longer than this many words.
-        url_col: Dataset column name for the image URL.
-        caption_col: Dataset column name for the text caption.
-        clip_col: Dataset column name for the CLIP score.
-        uid_col: Dataset column name for the unique identifier.
-        shuffle_buffer: Shuffle-buffer size for streaming (0 = no shuffle).
-        hf_token: HuggingFace token for authenticated access.
+        url_col: Dataset column containing the image URL.
+        caption_col: Dataset column containing the text caption.
+        clip_col: Dataset column containing the CLIP similarity score.
+        uid_col: Dataset column containing the unique sample identifier.
+        num_workers: Parallel shard-reader threads.
+        hf_token: HuggingFace auth token.
 
     Returns:
         Path to the written ``filtered.parquet`` file.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from datasets import load_dataset
 
     out_path = output_dir / "filtered.parquet"
-    print(f"Phase 1 — filtering {_DATASET_NAME}")
+    print(f"Phase 1 — filtering {_DATASET_NAME}  (workers={num_workers})")
     print(
         f"  clip >= {clip_threshold}  |  "
         f"caption words: [{min_caption_words}, {max_caption_words}]  |  "
         f"target: {target_samples:,}"
     )
 
-    ds = load_dataset(
-        _DATASET_NAME,
-        split="train",
-        streaming=True,
-        token=hf_token,
-    )
-    if shuffle_buffer > 0:
-        ds = ds.shuffle(seed=42, buffer_size=shuffle_buffer)
+    shards = _list_shards(hf_token)
+    print(f"  found {len(shards):,} parquet shards")
 
     schema = pa.schema(
         [
@@ -124,73 +261,70 @@ def _filter(
 
     accepted = 0
     scanned = 0
-    batch_urls: list[str] = []
-    batch_captions: list[str] = []
-    batch_uids: list[str] = []
+    shards_done = 0
 
     writer = pq.ParquetWriter(str(out_path), schema, compression="snappy")
 
-    def _flush() -> None:
-        writer.write_table(
-            pa.table(
-                {
-                    "url": batch_urls[:],
-                    "caption": batch_captions[:],
-                    "uid": batch_uids[:],
-                },
-                schema=schema,
-            )
+    worker_args = [
+        (
+            shard,
+            hf_token,
+            clip_threshold,
+            min_caption_words,
+            max_caption_words,
+            url_col,
+            caption_col,
+            clip_col,
+            uid_col,
         )
-        batch_urls.clear()
-        batch_captions.clear()
-        batch_uids.clear()
+        for shard in shards
+    ]
 
     try:
-        for row in ds:
-            scanned += 1
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {pool.submit(_filter_shard, a): a[0] for a in worker_args}
+            for future in as_completed(futures):
+                hf_path, df, n_scanned = future.result()
+                shards_done += 1
 
-            # ── field extraction ──────────────────────────────────────────
-            url = row.get(url_col) or ""
-            caption = row.get(caption_col) or ""
-            uid = str(row.get(uid_col) or "")
-            clip = row.get(clip_col)
+                if df is None or n_scanned is None:
+                    continue
 
-            # ── quality filters ───────────────────────────────────────────
-            if not url:
-                continue
-            if not caption:
-                continue
-            if clip is None or float(clip) < clip_threshold:
-                continue
-            words = len(caption.split())
-            if words < min_caption_words or words > max_caption_words:
-                continue
+                scanned += int(n_scanned)
 
-            # ── accept ────────────────────────────────────────────────────
-            batch_urls.append(url)
-            batch_captions.append(caption)
-            batch_uids.append(uid)
-            accepted += 1
+                if accepted >= target_samples:
+                    continue  # drain remaining futures (don't write)
 
-            if accepted % _BATCH_SIZE == 0:
-                _flush()
+                # Trim the shard if it would push us over the target.
+                remaining = target_samples - accepted
+                if len(df) > remaining:
+                    df = df.iloc[:remaining]
+
+                writer.write_table(pa.Table.from_pandas(df, schema=schema))
+                accepted += len(df)
+
                 pct = 100 * accepted / target_samples
                 print(
-                    f"  scanned {scanned:>12,}  accepted {accepted:>10,}"
-                    f"  ({pct:.1f}% of target)"
+                    f"  shard {shards_done:>5}/{len(shards):,}  "
+                    f"scanned {scanned:>12,}  "
+                    f"accepted {accepted:>10,}  ({pct:.1f}%)"
                 )
 
-            if accepted >= target_samples:
-                break
+                if accepted >= target_samples:
+                    # Cancel pending futures — we have enough rows.
+                    for f in futures:
+                        f.cancel()
+                    print("  target reached — cancelling remaining shards")
     finally:
-        if batch_urls:
-            _flush()
         writer.close()
 
     print(
-        f"Phase 1 done — scanned {scanned:,}, accepted {accepted:,}. "
-        f"Written to {out_path}"
+        f"\nPhase 1 done — "
+        f"shards processed: {shards_done:,}  "
+        f"scanned: {scanned:,}  "
+        f"accepted: {accepted:,}"
     )
+    print(f"Written to {out_path}")
     return out_path
 
 
@@ -208,20 +342,29 @@ def _download(
 ) -> None:
     """Invoke img2dataset to download and pack images from the filtered Parquet.
 
-    Images are resized so the shorter edge is ``_RESIZE_PX`` pixels, then
-    packed into WebDataset tar shards under ``output_dir/shards/``.
+    Images are resized so the shorter edge is ``_RESIZE_PX`` pixels (the
+    ViT image processor crops to 224 anyway), then packed into WebDataset
+    tar shards under ``output_dir/shards/``.
 
-    The ``url`` and ``caption`` columns written by :func:`_filter` map
+    Parallelism:
+        ``processes × threads`` concurrent HTTP connections.  With
+        ``processes=64`` and ``threads=64`` that is 4 096 concurrent
+        downloads — enough to saturate a 10 Gbit cluster uplink.
+
+    Timeout / retries:
+        ``--timeout 5`` fails dead URLs quickly (most fail in < 100 ms).
+        ``--retries 2`` handles transient network hiccups without wasting
+        time on truly dead URLs.
+
+    The ``url`` and ``caption`` columns produced by :func:`_filter` map
     directly to img2dataset's ``url_col`` / ``caption_col``.  The ``uid``
-    column is preserved as a sidecar JSON field in each shard sample.
+    column is preserved as a sidecar JSON field in every shard sample.
 
     Args:
         parquet_path: Path to the filtered Parquet produced by :func:`_filter`.
-        output_dir: Root directory; shards are written to a ``shards/``
-            subdirectory.
-        processes: Number of download processes (``img2dataset
-            --processes_count``).
-        threads: Threads per process (``img2dataset --thread_count``).
+        output_dir: Root directory; shards land in ``shards/``.
+        processes: ``img2dataset --processes_count``.
+        threads: ``img2dataset --thread_count`` (per process).
     """
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +395,10 @@ def _download(
         str(processes),
         "--thread_count",
         str(threads),
+        "--timeout",
+        "5",
+        "--retries",
+        "2",
         "--save_additional_columns",
         '["uid"]',
         "--distributor",
@@ -261,17 +408,23 @@ def _download(
     ]
 
     print("\nPhase 2 — downloading images")
+    print(
+        f"  processes={processes}  threads={threads}  "
+        f"({processes * threads:,} concurrent connections)"
+    )
     print("  " + " \\\n    ".join(cmd))
+
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
         print(
             f"\nimg2dataset exited with code {result.returncode}. "
-            "Check the output above for details. Partial shards in "
-            f"{shards_dir} are safe to leave in place — re-running will "
-            "resume from where it left off.",
+            "Partial shards in "
+            f"{shards_dir} are safe to leave — re-running resumes from "
+            "the last completed shard.",
             file=sys.stderr,
         )
         sys.exit(result.returncode)
+
     print(f"\nPhase 2 done — shards written to {shards_dir}")
 
 
@@ -281,23 +434,46 @@ def _download(
 
 
 def _list_columns(hf_token: str | None) -> None:
-    """Print the column names and a sample row from the dataset, then exit."""
-    from datasets import load_dataset
+    """Print repo structure and column names from the first shard, then exit."""
+    from huggingface_hub import HfFileSystem
 
-    print(f"Loading one row from {_DATASET_NAME} to inspect columns…")
-    ds = load_dataset(
-        _DATASET_NAME,
-        split="train",
-        streaming=True,
-        token=hf_token,
+    fs = HfFileSystem(token=hf_token)
+    print(f"Listing top-level entries in datasets/{_DATASET_NAME}:")
+    top: list[dict[str, Any]] = cast(
+        list[dict[str, Any]],
+        fs.ls(f"datasets/{_DATASET_NAME}", detail=True),
     )
-    row = next(iter(ds))
-    print("\nColumns and sample values:")
-    for k, v in row.items():
-        snippet = str(v)
-        if len(snippet) > 120:
-            snippet = snippet[:117] + "..."
-        print(f"  {k!r:30s} {snippet!r}")
+    for entry in top[:20]:
+        print(f"  {entry.get('type', '?'):6s}  {entry.get('name', '?')}")
+
+    # Find first parquet and sample one row.
+    parquet_files: list[str] = [
+        str(e["name"]) for e in top if str(e.get("name", "")).endswith(".parquet")
+    ]
+    if not parquet_files:
+        for entry in top:
+            try:
+                sub: list[str] = cast(
+                    list[str], fs.ls(str(entry["name"]), detail=False)
+                )
+                parquet_files = [p for p in sub if p.endswith(".parquet")]
+                if parquet_files:
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not parquet_files:
+        print("\nNo parquet files found — check repo structure above.")
+        return
+
+    import pyarrow.parquet as pq
+
+    sample_path = parquet_files[0]
+    print(f"\nSampling first row from {sample_path}:")
+    schema = pq.read_schema(sample_path, filesystem=fs)
+    print("\nColumn names:")
+    for name in schema.names:
+        print(f"  {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +503,12 @@ def main() -> None:
     parser.add_argument(
         "--target-samples",
         type=int,
-        default=40_000_000,
-        help="Stop after accepting this many samples in Phase 1.",
+        default=60_000_000,
+        help=(
+            "Collect this many rows in Phase 1. Set higher than your image "
+            "target to account for URL mortality (default 60 M → ~40 M "
+            "live images assuming ~30%% dead URLs)."
+        ),
     )
     parser.add_argument(
         "--clip-threshold",
@@ -349,12 +529,12 @@ def main() -> None:
         help="Reject captions longer than this many words.",
     )
     parser.add_argument(
-        "--shuffle-buffer",
+        "--num-filter-workers",
         type=int,
-        default=100_000,
+        default=_DEFAULT_FILTER_WORKERS,
         help=(
-            "Streaming shuffle-buffer size for Phase 1. "
-            "0 disables shuffling (samples in dataset order)."
+            "Parallel shard-reader threads for Phase 1. "
+            "Each thread reads one parquet shard from HF over the network."
         ),
     )
     parser.add_argument(
@@ -370,17 +550,21 @@ def main() -> None:
     parser.add_argument("--uid-col", default=_DEFAULT_UID_COL)
 
     # ── download params ───────────────────────────────────────────────────────
-    default_procs = int(os.environ.get("SLURM_CPUS_PER_TASK", _DEFAULT_PROCESSES))
+    default_procs = int(
+        os.environ.get("SLURM_CPUS_PER_TASK", _DEFAULT_IMG2DATASET_PROCESSES)
+    )
     parser.add_argument(
         "--processes",
         type=int,
         default=default_procs,
-        help="img2dataset --processes_count (download parallelism).",
+        help=(
+            "img2dataset --processes_count. Defaults to SLURM_CPUS_PER_TASK when set."
+        ),
     )
     parser.add_argument(
         "--threads",
         type=int,
-        default=_DEFAULT_THREADS,
+        default=_DEFAULT_IMG2DATASET_THREADS,
         help="img2dataset --thread_count (threads per process).",
     )
 
@@ -398,7 +582,7 @@ def main() -> None:
     parser.add_argument(
         "--list-columns",
         action="store_true",
-        help="Print dataset column names from the first row and exit.",
+        help="Print dataset repo structure and column names, then exit.",
     )
 
     args = parser.parse_args()
@@ -439,7 +623,7 @@ def main() -> None:
             caption_col=args.caption_col,
             clip_col=args.clip_col,
             uid_col=args.uid_col,
-            shuffle_buffer=args.shuffle_buffer,
+            num_workers=args.num_filter_workers,
             hf_token=hf_token,
         )
 

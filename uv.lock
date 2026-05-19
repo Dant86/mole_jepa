@@ -1271,6 +1271,7 @@ dependencies = [
 
 [package.dev-dependencies]
 data = [
+    { name = "huggingface-hub" },
     { name = "img2dataset" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -1298,6 +1299,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 data = [
+    { name = "huggingface-hub", specifier = ">=0.23" },
     { name = "img2dataset", specifier = ">=1.41" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=14.0" },
