@@ -461,6 +461,11 @@ def _filter(
 # ---------------------------------------------------------------------------
 
 
+def _shards_size_gb(shards_dir: Path) -> float:
+    """Return total size in GB of all completed ``.tar`` shards."""
+    return _shards_size_gb(shards_dir)
+
+
 def _monitor_storage(
     shards_dir: Path,
     limit_bytes: int,
@@ -482,8 +487,8 @@ def _monitor_storage(
     """
     while not stop_event.is_set():
         # Sum only completed shards; ignore in-progress temp files.
-        used = sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file())
-        used_gb = used / 1e9
+        used_gb = _shards_size_gb(shards_dir)
+        used = int(used_gb * 1e9)
         if used >= limit_bytes:
             print(
                 f"\n[storage monitor] {used_gb:.1f} GB >= limit "
@@ -600,7 +605,11 @@ def _download(
     limit_bytes = int(storage_limit_gb * 1e9)
     stop_event = threading.Event()
 
-    proc = subprocess.Popen(cmd)  # noqa: S603
+    # start_new_session isolates img2dataset in its own process group so the
+    # bash preemption handler's group-kill (kill -USR1 -- -PY_PID) only hits
+    # Python.  Python's USR1 handler then sends SIGTERM to img2dataset cleanly,
+    # letting it finish writing the current shard before exiting.
+    proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
     _img2dataset_proc = proc  # expose to USR1 handler
     monitor = threading.Thread(
         target=_monitor_storage,
@@ -617,9 +626,7 @@ def _download(
     # Preemption: USR1 handler sent SIGTERM to img2dataset before we exit.
     # Report cleanly and tell the caller to exit 99 for requeue.
     if _preempt_requested.is_set():
-        used_gb = (
-            sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file()) / 1e9
-        )
+        used_gb = _shards_size_gb(shards_dir)
         print(
             f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
             "img2dataset will resume from the last completed shard on next run.",
@@ -632,9 +639,7 @@ def _download(
     terminated_by_monitor = returncode in (-15, 143)
 
     if terminated_by_monitor:
-        used_gb = (
-            sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file()) / 1e9
-        )
+        used_gb = _shards_size_gb(shards_dir)
         print(
             f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
             f"(limit {storage_limit_gb:.0f} GB)."
@@ -876,8 +881,8 @@ def main() -> None:
 
     # ── summary ───────────────────────────────────────────────────────────────
     shards_dir = output_dir / "shards"
-    n_shards = len(list(shards_dir.glob("*.tar")))
-    size_gb = sum(f.stat().st_size for f in shards_dir.glob("*.tar")) / 1e9
+    n_shards = len(list(shards_dir.rglob("*.tar")))
+    size_gb = _shards_size_gb(shards_dir)
     print(f"\n{'─' * 60}")
     print(f"  Shards: {n_shards:,}  ·  On disk: {size_gb:.1f} GB")
     print("\nPass to the train script:")
