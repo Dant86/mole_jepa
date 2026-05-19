@@ -50,6 +50,8 @@ import argparse
 import random
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, cast
@@ -64,6 +66,8 @@ _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
 _DEFAULT_IMG2DATASET_PROCESSES = 64  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
+_DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
+_STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
 
 # Default column names in mlfoundations/recap-datacomp-1b.
 _DEFAULT_URL_COL = "url"
@@ -333,12 +337,50 @@ def _filter(
 # ---------------------------------------------------------------------------
 
 
+def _monitor_storage(
+    shards_dir: Path,
+    limit_bytes: int,
+    process: subprocess.Popen[bytes],
+    stop_event: threading.Event,
+) -> None:
+    """Poll shard directory size and terminate *process* if limit is exceeded.
+
+    Runs as a daemon thread alongside the img2dataset subprocess.  Only
+    completed ``.tar`` files are counted (img2dataset writes to a temp path
+    then atomically renames), so the check reflects committed, readable data.
+
+    Args:
+        shards_dir: Directory where img2dataset writes tar shards.
+        limit_bytes: Terminate *process* once this many bytes are on disk.
+        process: The running img2dataset ``Popen`` handle.
+        stop_event: Set by the main thread when img2dataset exits normally,
+            so the monitor doesn't race to read a dead process.
+    """
+    while not stop_event.is_set():
+        # Sum only completed shards; ignore in-progress temp files.
+        used = sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file())
+        used_gb = used / 1e9
+        if used >= limit_bytes:
+            print(
+                f"\n[storage monitor] {used_gb:.1f} GB >= limit "
+                f"{limit_bytes / 1e9:.1f} GB — sending SIGTERM to img2dataset.",
+                flush=True,
+            )
+            try:
+                process.terminate()
+            except OSError:
+                pass  # process already gone
+            return
+        time.sleep(_STORAGE_POLL_INTERVAL_S)
+
+
 def _download(
     parquet_path: Path,
     output_dir: Path,
     *,
     processes: int,
     threads: int,
+    storage_limit_gb: float,
 ) -> None:
     """Invoke img2dataset to download and pack images from the filtered Parquet.
 
@@ -356,6 +398,14 @@ def _download(
         ``--retries 2`` handles transient network hiccups without wasting
         time on truly dead URLs.
 
+    Storage guard:
+        A daemon thread polls the shard directory every
+        ``_STORAGE_POLL_INTERVAL_S`` seconds.  When the total size of
+        completed ``.tar`` files reaches ``storage_limit_gb`` GB, the
+        thread sends ``SIGTERM`` to img2dataset and exits.  This exit is
+        treated as a clean stop (not an error), so the script reports
+        success and prints the final shard count.
+
     The ``url`` and ``caption`` columns produced by :func:`_filter` map
     directly to img2dataset's ``url_col`` / ``caption_col``.  The ``uid``
     column is preserved as a sidecar JSON field in every shard sample.
@@ -365,6 +415,8 @@ def _download(
         output_dir: Root directory; shards land in ``shards/``.
         processes: ``img2dataset --processes_count``.
         threads: ``img2dataset --thread_count`` (per process).
+        storage_limit_gb: Terminate img2dataset once this many GB of
+            completed shards are written.
     """
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
@@ -412,20 +464,46 @@ def _download(
         f"  processes={processes}  threads={threads}  "
         f"({processes * threads:,} concurrent connections)"
     )
+    print(f"  storage limit: {storage_limit_gb:.0f} GB")
     print("  " + " \\\n    ".join(cmd))
 
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
+    limit_bytes = int(storage_limit_gb * 1e9)
+    stop_event = threading.Event()
+
+    proc = subprocess.Popen(cmd)  # noqa: S603
+    monitor = threading.Thread(
+        target=_monitor_storage,
+        args=(shards_dir, limit_bytes, proc, stop_event),
+        daemon=True,
+    )
+    monitor.start()
+
+    returncode = proc.wait()
+    stop_event.set()  # tell the monitor thread to exit its loop
+    monitor.join(timeout=5)
+
+    # SIGTERM (returncode -15) means the storage monitor fired — that's
+    # a clean, intentional stop, not an error.
+    terminated_by_monitor = returncode in (-15, 143)
+
+    if terminated_by_monitor:
+        used_gb = (
+            sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file()) / 1e9
+        )
         print(
-            f"\nimg2dataset exited with code {result.returncode}. "
-            "Partial shards in "
-            f"{shards_dir} are safe to leave — re-running resumes from "
-            "the last completed shard.",
+            f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
+            f"(limit {storage_limit_gb:.0f} GB)."
+        )
+    elif returncode != 0:
+        print(
+            f"\nimg2dataset exited with code {returncode}. "
+            f"Partial shards in {shards_dir} are safe to leave — "
+            "re-running resumes from the last completed shard.",
             file=sys.stderr,
         )
-        sys.exit(result.returncode)
-
-    print(f"\nPhase 2 done — shards written to {shards_dir}")
+        sys.exit(returncode)
+    else:
+        print(f"\nPhase 2 done — shards written to {shards_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +645,15 @@ def main() -> None:
         default=_DEFAULT_IMG2DATASET_THREADS,
         help="img2dataset --thread_count (threads per process).",
     )
+    parser.add_argument(
+        "--storage-limit-gb",
+        type=float,
+        default=_DEFAULT_STORAGE_LIMIT_GB,
+        help=(
+            "Terminate img2dataset once this many GB of completed shards "
+            "are written to disk. Prevents filling the scratch partition."
+        ),
+    )
 
     # ── phase control ────────────────────────────────────────────────────────
     parser.add_argument(
@@ -637,6 +724,7 @@ def main() -> None:
         output_dir,
         processes=args.processes,
         threads=args.threads,
+        storage_limit_gb=args.storage_limit_gb,
     )
 
     # ── summary ───────────────────────────────────────────────────────────────
