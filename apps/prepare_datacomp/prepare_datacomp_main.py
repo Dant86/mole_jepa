@@ -143,25 +143,27 @@ def _list_shards(token: str | None, subset: str) -> list[str]:
     """
     from huggingface_hub import list_repo_files
 
+    # The HF viewer (and the subset-organised parquet files) live on the
+    # auto-conversion branch, not main.  Files there are laid out as
+    # {config_name}/train/NNNNN.parquet, so filtering by subset name works.
     all_files = list(
         list_repo_files(
             _DATASET_NAME,
             repo_type="dataset",
+            revision="refs/convert/parquet",
             token=token,
         )
     )
     parquet_paths = [
-        f"hf://datasets/{_DATASET_NAME}/{f}"
+        f"hf://datasets/{_DATASET_NAME}@refs%2Fconvert%2Fparquet/{f}"
         for f in all_files
-        if f.endswith(".parquet")
+        if f.endswith(".parquet") and subset in f
     ]
-
-    # Filter to the requested subset so broken configs are not touched.
-    parquet_paths = [p for p in parquet_paths if subset in p]
 
     if not parquet_paths:
         raise RuntimeError(
-            f"No parquet files found for subset {subset!r} in {_DATASET_NAME}. "
+            f"No parquet files found for subset {subset!r} in {_DATASET_NAME} "
+            "(refs/convert/parquet). "
             "Run with --list-columns to inspect the repo structure."
         )
 
@@ -666,9 +668,15 @@ def _list_columns(hf_token: str | None) -> None:
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem, list_repo_files
 
-    print(f"Files in {_DATASET_NAME}:")
+    _PARQUET_REV = "refs/convert/parquet"
+    print(f"Files in {_DATASET_NAME} (revision={_PARQUET_REV!r}):")
     all_files = list(
-        list_repo_files(_DATASET_NAME, repo_type="dataset", token=hf_token)
+        list_repo_files(
+            _DATASET_NAME,
+            repo_type="dataset",
+            revision=_PARQUET_REV,
+            token=hf_token,
+        )
     )
     for f in all_files[:20]:
         print(f"  {f}")
@@ -680,7 +688,8 @@ def _list_columns(hf_token: str | None) -> None:
         print("\nNo parquet files found — check repo structure above.")
         return
 
-    sample_url = f"hf://datasets/{_DATASET_NAME}/{parquet_files[0]}"
+    _encoded_rev = _PARQUET_REV.replace("/", "%2F")
+    sample_url = f"hf://datasets/{_DATASET_NAME}@{_encoded_rev}/{parquet_files[0]}"
     print(f"\nSampling schema from {sample_url}:")
     fs = HfFileSystem(token=hf_token)
     schema = pq.read_schema(sample_url, filesystem=fs)
