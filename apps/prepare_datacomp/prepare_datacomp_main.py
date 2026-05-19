@@ -2,10 +2,11 @@ r"""Filter Recap-DataComp-1B metadata and download images as WebDataset shards.
 
 Two-phase pipeline:
 
-1. **Filter** — list all parquet shards in ``mlfoundations/recap-datacomp-1b``
-   via ``HfFileSystem``, read only the required columns (no full-file
-   download), apply quality filters (CLIP score + re-caption length), and
-   write a filtered Parquet to ``{output_dir}/filtered.parquet``.
+1. **Filter** — list all parquet shards in the target subset of
+   ``UCSC-VLAA/Recap-DataComp-1B`` via ``HfFileSystem``, read only the
+   required columns (no full-file download), apply quality filters (caption
+   word count), and write a filtered Parquet to
+   ``{output_dir}/filtered.parquet``.
    *N* shards are processed in parallel with a ``ThreadPoolExecutor``,
    which is I/O-bound (network reads) and releases the GIL for pandas work.
 
@@ -40,10 +41,10 @@ Usage::
 
 Column names (run with --list-columns to inspect the first row)::
 
-    --url-col       url             (image URL)
-    --caption-col   re_caption      (LLaVA-1.5 recaption)
-    --clip-col      re_clip_score   (CLIP score for the recaption)
-    --uid-col       key             (unique sample identifier)
+    --url-col       url                                (image URL)
+    --caption-col   re_caption_condition_diverse_topk  (subset-specific recaption)
+    --clip-col      re_clip_score                      (CLIP score for the recaption)
+    --uid-col       key                                (unique sample identifier)
 """
 
 import argparse
@@ -73,9 +74,11 @@ _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
 # The "default" config has known conversion errors; condition_diverse_topk is clean.
 _DEFAULT_SUBSET = "condition_diverse_topk"
 
-# Default column names in UCSC-VLAA/Recap-DataComp-1B.
+# Default column names in UCSC-VLAA/Recap-DataComp-1B (condition_diverse_topk).
+# The subset-specific caption is re_caption_condition_diverse_topk; it tends
+# to be longer and more detailed than the base re_caption.
 _DEFAULT_URL_COL = "url"
-_DEFAULT_CAPTION_COL = "re_caption"
+_DEFAULT_CAPTION_COL = "re_caption_condition_diverse_topk"
 _DEFAULT_CLIP_COL = "re_clip_score"
 _DEFAULT_UID_COL = "key"
 
@@ -232,6 +235,28 @@ def _filter_shard(
         return hf_path, None, None, {}
 
     n_scanned = len(df)
+
+    # ── one-time debug: print raw clip score stats from the very first shard
+    # so it's easy to spot column name or scale issues without a full run.
+    if getattr(_filter_shard, "_debug_printed", False) is False:
+        _filter_shard._debug_printed = True  # type: ignore[attr-defined]
+        clip_series = df[clip_col].dropna() if clip_col in df.columns else None
+        if clip_series is not None and len(clip_series):
+            print(
+                f"  [debug] clip col={clip_col!r}  "
+                f"n={len(clip_series):,}  "
+                f"min={clip_series.min():.4f}  "
+                f"max={clip_series.max():.4f}  "
+                f"mean={clip_series.mean():.4f}  "
+                f"sample={list(clip_series[:5].round(4))}",
+                flush=True,
+            )
+        else:
+            print(
+                f"  [debug] clip col={clip_col!r} not found in columns: "
+                f"{list(df.columns)}",
+                flush=True,
+            )
 
     # ── quality filters (each step tracked for diagnostics) ───────────────
     df = df[df[url_col].notna() & (df[url_col] != "")]
@@ -748,11 +773,10 @@ def main() -> None:
         type=float,
         default=0.2,
         help=(
-            "Minimum re_clip_score (image vs LLaVA recaption). "
-            "LLaVA recaptions are long and verbose, so CLIP scores them "
-            "lower than short alt-text — 0.2 is a reasonable starting point. "
-            "Set to 0.0 to disable. Check the 'clip' column in the filter "
-            "funnel to tune."
+            "Minimum re_clip_score (image vs recaption). "
+            "LLaVA recaptions are verbose paragraphs, so CLIP scores them "
+            "lower than short alt-text — 0.2 is a reasonable floor. "
+            "Set to 0.0 to disable."
         ),
     )
     parser.add_argument(
