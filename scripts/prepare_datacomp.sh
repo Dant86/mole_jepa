@@ -115,7 +115,7 @@ trap on_term TERM
 setsid uv run --group data python apps/prepare_datacomp/prepare_datacomp_main.py \
     --output-dir           "${DATACOMP_LOCAL_DIR}" \
     --target-samples       60000000 \
-    --clip-threshold       0.28 \
+    --clip-threshold       0.2 \
     --num-filter-workers   "${SLURM_CPUS_PER_TASK}" \
     "$@" &
 PY_PID=$!
