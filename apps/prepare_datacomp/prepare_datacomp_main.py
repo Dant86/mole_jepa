@@ -47,7 +47,9 @@ Column names (run with --list-columns to inspect the first row)::
 """
 
 import argparse
+import os
 import random
+import signal
 import subprocess
 import sys
 import threading
@@ -74,6 +76,45 @@ _DEFAULT_URL_COL = "url"
 _DEFAULT_CAPTION_COL = "re_caption"
 _DEFAULT_CLIP_COL = "clip_l14_score"
 _DEFAULT_UID_COL = "uid"
+
+
+# ---------------------------------------------------------------------------
+# SLURM preemption support
+# ---------------------------------------------------------------------------
+
+# Set by the SIGUSR1 handler; checked in _filter and _download to trigger a
+# clean exit with code 99 so SLURM requeues the job.
+_preempt_requested: threading.Event = threading.Event()
+
+# Populated by _download while img2dataset is running so the signal handler
+# can forward SIGTERM to it immediately.
+_img2dataset_proc: subprocess.Popen[bytes] | None = None
+
+
+def _install_preempt_handler() -> None:
+    """Install a SIGUSR1 handler for SLURM preemption.
+
+    When the batch script receives ``--signal=B:USR1@300`` from SLURM it
+    forwards SIGUSR1 to this process.  The handler sets ``_preempt_requested``
+    and, if img2dataset is running, sends it SIGTERM so it exits cleanly
+    before Slurm hard-kills the job.  The main thread detects the flag after
+    img2dataset exits and calls ``sys.exit(99)`` to trigger a requeue.
+    """
+
+    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        print(
+            "\n[preempt] SIGUSR1 received — stopping cleanly for Slurm requeue.",
+            flush=True,
+        )
+        _preempt_requested.set()
+        proc = _img2dataset_proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass  # process already gone
+
+    signal.signal(signal.SIGUSR1, _handler)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +255,7 @@ def _filter(
     uid_col: str,
     num_workers: int,
     hf_token: str | None,
-) -> Path:
+) -> Path | None:
     """Stream Recap-DataComp-1B shards in parallel, filter, write Parquet.
 
     Shards are listed from the HuggingFace repo, shuffled for diversity,
@@ -239,12 +280,19 @@ def _filter(
         hf_token: HuggingFace auth token.
 
     Returns:
-        Path to the written ``filtered.parquet`` file.
+        Path to the written ``filtered.parquet`` file, or ``None`` if the
+        job was preempted mid-filter (caller should exit 99).
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     out_path = output_dir / "filtered.parquet"
+    # Write to a temp file and atomic-rename on success.  This way a
+    # mid-Phase-1 preemption or crash never leaves a partial file that would
+    # be mistaken for a complete one on the next (requeued) run.
+    tmp_path = out_path.with_suffix(".parquet.tmp")
+    tmp_path.unlink(missing_ok=True)
+
     print(f"Phase 1 — filtering {_DATASET_NAME}  (workers={num_workers})")
     print(
         f"  clip >= {clip_threshold}  |  "
@@ -267,7 +315,7 @@ def _filter(
     scanned = 0
     shards_done = 0
 
-    writer = pq.ParquetWriter(str(out_path), schema, compression="snappy")
+    writer = pq.ParquetWriter(str(tmp_path), schema, compression="snappy")
 
     worker_args = [
         (
@@ -284,10 +332,22 @@ def _filter(
         for shard in shards
     ]
 
+    preempted = False
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
             futures = {pool.submit(_filter_shard, a): a[0] for a in worker_args}
             for future in as_completed(futures):
+                # Check preemption on every completed shard.
+                if _preempt_requested.is_set():
+                    print(
+                        "\n[preempt] Stopping Phase 1 early — will rerun on next job.",
+                        flush=True,
+                    )
+                    for f in futures:
+                        f.cancel()
+                    preempted = True
+                    break
+
                 hf_path, df, n_scanned = future.result()
                 shards_done += 1
 
@@ -321,6 +381,15 @@ def _filter(
                     print("  target reached — cancelling remaining shards")
     finally:
         writer.close()
+        if preempted:
+            # Delete the incomplete temp file so the next run reruns Phase 1.
+            tmp_path.unlink(missing_ok=True)
+
+    if preempted:
+        return None  # signal caller to exit 99
+
+    # Atomic rename: only visible as the final path once fully written.
+    os.replace(tmp_path, out_path)
 
     print(
         f"\nPhase 1 done — "
@@ -381,7 +450,7 @@ def _download(
     processes: int,
     threads: int,
     storage_limit_gb: float,
-) -> None:
+) -> bool:
     """Invoke img2dataset to download and pack images from the filtered Parquet.
 
     Images are resized so the shorter edge is ``_RESIZE_PX`` pixels (the
@@ -417,7 +486,13 @@ def _download(
         threads: ``img2dataset --thread_count`` (per process).
         storage_limit_gb: Terminate img2dataset once this many GB of
             completed shards are written.
+
+    Returns:
+        ``True`` if the job was preempted (caller should exit 99),
+        ``False`` for a normal or storage-guard stop.
     """
+    global _img2dataset_proc  # noqa: PLW0603
+
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
@@ -471,6 +546,7 @@ def _download(
     stop_event = threading.Event()
 
     proc = subprocess.Popen(cmd)  # noqa: S603
+    _img2dataset_proc = proc  # expose to USR1 handler
     monitor = threading.Thread(
         target=_monitor_storage,
         args=(shards_dir, limit_bytes, proc, stop_event),
@@ -479,10 +555,24 @@ def _download(
     monitor.start()
 
     returncode = proc.wait()
+    _img2dataset_proc = None
     stop_event.set()  # tell the monitor thread to exit its loop
     monitor.join(timeout=5)
 
-    # SIGTERM (returncode -15) means the storage monitor fired — that's
+    # Preemption: USR1 handler sent SIGTERM to img2dataset before we exit.
+    # Report cleanly and tell the caller to exit 99 for requeue.
+    if _preempt_requested.is_set():
+        used_gb = (
+            sum(f.stat().st_size for f in shards_dir.glob("*.tar") if f.is_file()) / 1e9
+        )
+        print(
+            f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
+            "img2dataset will resume from the last completed shard on next run.",
+            flush=True,
+        )
+        return True  # caller exits 99
+
+    # SIGTERM (returncode -15 / 143) means the storage monitor fired — that's
     # a clean, intentional stop, not an error.
     terminated_by_monitor = returncode in (-15, 143)
 
@@ -504,6 +594,8 @@ def _download(
         sys.exit(returncode)
     else:
         print(f"\nPhase 2 done — shards written to {shards_dir}")
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +766,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Install SIGUSR1 handler before doing any work so preemption is always
+    # caught, even during Phase 1.
+    _install_preempt_handler()
+
     hf_token = os.environ.get("HF_TOKEN")
 
     if args.list_columns:
@@ -700,7 +796,7 @@ def main() -> None:
             "(pass --force-filter to redo)."
         )
     else:
-        parquet_path = _filter(
+        result = _filter(
             output_dir,
             target_samples=args.target_samples,
             clip_threshold=args.clip_threshold,
@@ -713,19 +809,26 @@ def main() -> None:
             num_workers=args.num_filter_workers,
             hf_token=hf_token,
         )
+        if result is None:
+            # Preempted mid-Phase 1 — exit 99 for requeue.
+            sys.exit(99)
+        parquet_path = result
 
     # ── Phase 2: download ─────────────────────────────────────────────────────
     if args.skip_download:
         print("Skipping Phase 2 (--skip-download).")
         return
 
-    _download(
+    preempted = _download(
         parquet_path,
         output_dir,
         processes=args.processes,
         threads=args.threads,
         storage_limit_gb=args.storage_limit_gb,
     )
+
+    if preempted:
+        sys.exit(99)
 
     # ── summary ───────────────────────────────────────────────────────────────
     shards_dir = output_dir / "shards"
