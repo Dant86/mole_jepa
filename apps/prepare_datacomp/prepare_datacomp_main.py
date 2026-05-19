@@ -4,9 +4,9 @@ Two-phase pipeline:
 
 1. **Filter** — list all parquet shards in ``UCSC-VLAA/Recap-DataComp-1B``
    (main branch, ``data/train_data/``) via ``HfFileSystem``, read only the
-   required columns (no full-file download), apply quality filters (CLIP
-   score + caption word count), and write a filtered Parquet to
-   ``{output_dir}/filtered.parquet``.
+   required columns (no full-file download), apply quality filters (non-null
+   URL + caption, optional word-count bounds), and write a filtered Parquet
+   to ``{output_dir}/filtered.parquet``.
    *N* shards are processed in parallel with a ``ThreadPoolExecutor``,
    which is I/O-bound (network reads) and releases the GIL for pandas work.
 
@@ -43,11 +43,10 @@ Column names (run with --list-columns to inspect the first row)::
 
     --url-col       url                                (image URL)
     --caption-col   re_caption_condition_diverse_topk  (diverse-condition recaption)
-    --clip-col      re_clip_score                      (CLIP similarity score)
     --uid-col       key                                (unique sample identifier)
 
 Note: always read from the **main branch** (``data/train_data/``).  The
-auto-generated ``refs/convert/parquet`` branch zeros out ``re_clip_score``.
+auto-generated ``refs/convert/parquet`` branch zeros out all score columns.
 """
 
 import argparse
@@ -79,7 +78,6 @@ _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
 # recaption — which tends to be longer and more detailed than re_caption.
 _DEFAULT_URL_COL = "url"
 _DEFAULT_CAPTION_COL = "re_caption_condition_diverse_topk"
-_DEFAULT_CLIP_COL = "re_clip_score"
 _DEFAULT_UID_COL = "key"
 
 
@@ -176,12 +174,10 @@ def _filter_shard(
     args: tuple[
         str,  # hf_path  — full HfFileSystem path to the parquet shard
         str | None,  # token
-        float,  # clip_threshold
         int,  # min_caption_words
         int,  # max_caption_words
         str,  # url_col
         str,  # caption_col
-        str,  # clip_col
         str,  # uid_col
     ],
 ) -> tuple[str, Any, Any, dict[str, int]]:
@@ -198,8 +194,8 @@ def _filter_shard(
     Returns:
         ``(hf_path, filtered_df, n_scanned, stats)`` on success, or
         ``(hf_path, None, None, {})`` if the shard could not be read.
-        *stats* keys: ``after_url``, ``after_caption``, ``after_clip``,
-        ``after_words`` — row counts surviving each successive filter.
+        *stats* keys: ``after_url``, ``after_caption``, ``after_words`` —
+        row counts surviving each successive filter.
     """
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
@@ -207,12 +203,10 @@ def _filter_shard(
     (
         hf_path,
         token,
-        clip_threshold,
         min_words,
         max_words,
         url_col,
         caption_col,
-        clip_col,
         uid_col,
     ) = args
 
@@ -223,7 +217,7 @@ def _filter_shard(
         fs = HfFileSystem(token=token)
         table = pq.read_table(
             hf_path,
-            columns=[url_col, caption_col, clip_col, uid_col],
+            columns=[url_col, caption_col, uid_col],
             filesystem=fs,
         )
         df = table.to_pandas()
@@ -233,38 +227,12 @@ def _filter_shard(
 
     n_scanned = len(df)
 
-    # ── one-time debug: print raw clip score stats from the very first shard
-    # so it's easy to spot column name or scale issues without a full run.
-    if getattr(_filter_shard, "_debug_printed", False) is False:
-        _filter_shard._debug_printed = True  # type: ignore[attr-defined]
-        clip_series = df[clip_col].dropna() if clip_col in df.columns else None
-        if clip_series is not None and len(clip_series):
-            print(
-                f"  [debug] clip col={clip_col!r}  "
-                f"n={len(clip_series):,}  "
-                f"min={clip_series.min():.4f}  "
-                f"max={clip_series.max():.4f}  "
-                f"mean={clip_series.mean():.4f}  "
-                f"sample={list(clip_series[:5].round(4))}",
-                flush=True,
-            )
-        else:
-            print(
-                f"  [debug] clip col={clip_col!r} not found in columns: "
-                f"{list(df.columns)}",
-                flush=True,
-            )
-
     # ── quality filters (each step tracked for diagnostics) ───────────────
     df = df[df[url_col].notna() & (df[url_col] != "")]
     after_url = len(df)
 
     df = df[df[caption_col].notna() & (df[caption_col] != "")]
     after_caption = len(df)
-
-    if clip_threshold > 0:
-        df = df[df[clip_col].notna() & (df[clip_col].astype(float) >= clip_threshold)]
-    after_clip = len(df)
 
     word_counts = df[caption_col].str.split().str.len()
     word_mask = word_counts >= min_words
@@ -281,7 +249,6 @@ def _filter_shard(
     stats = {
         "after_url": after_url,
         "after_caption": after_caption,
-        "after_clip": after_clip,
         "after_words": after_words,
     }
     return hf_path, df, n_scanned, stats
@@ -291,12 +258,10 @@ def _filter(
     output_dir: Path,
     *,
     target_samples: int,
-    clip_threshold: float,
     min_caption_words: int,
     max_caption_words: int,
     url_col: str,
     caption_col: str,
-    clip_col: str,
     uid_col: str,
     num_workers: int,
     hf_token: str | None,
@@ -306,20 +271,18 @@ def _filter(
     Shards are listed from the HuggingFace repo, shuffled for diversity,
     then dispatched to a ``ThreadPoolExecutor``.  Each worker reads only
     the required columns directly from HF (no full-shard download to disk),
-    applies pandas-based quality filters, and returns the accepted rows.
-    Results are written to ``{output_dir}/filtered.parquet`` in batches as
-    workers complete.  Scanning stops once ``target_samples`` rows have been
-    accepted.
+    applies quality filters (non-null URL + caption, word-count bounds), and
+    returns the accepted rows.  Results are written to
+    ``{output_dir}/filtered.parquet`` in batches as workers complete.
+    Scanning stops once ``target_samples`` rows have been accepted.
 
     Args:
         output_dir: Directory in which to write ``filtered.parquet``.
         target_samples: Stop accepting rows after this many pass all filters.
-        clip_threshold: Minimum CLIP ViT-L/14 score.
         min_caption_words: Reject captions shorter than this many words.
         max_caption_words: Reject captions longer than this many words.
         url_col: Dataset column containing the image URL.
         caption_col: Dataset column containing the text caption.
-        clip_col: Dataset column containing the CLIP similarity score.
         uid_col: Dataset column containing the unique sample identifier.
         num_workers: Parallel shard-reader threads.
         hf_token: HuggingFace auth token.
@@ -340,8 +303,7 @@ def _filter(
 
     print(f"Phase 1 — filtering {_DATASET_NAME}  (workers={num_workers})")
     print(
-        f"  clip >= {clip_threshold}  |  "
-        f"caption words: [{min_caption_words}, {max_caption_words}]  |  "
+        f"  caption words: [{min_caption_words}, {max_caption_words}]  |  "
         f"target: {target_samples:,}"
     )
 
@@ -362,7 +324,6 @@ def _filter(
     # Running per-filter totals for diagnostics.
     tot_after_url = 0
     tot_after_caption = 0
-    tot_after_clip = 0
     tot_after_words = 0
 
     writer = pq.ParquetWriter(str(tmp_path), schema, compression="snappy")
@@ -371,12 +332,10 @@ def _filter(
         (
             shard,
             hf_token,
-            clip_threshold,
             min_caption_words,
             max_caption_words,
             url_col,
             caption_col,
-            clip_col,
             uid_col,
         )
         for shard in shards
@@ -407,7 +366,6 @@ def _filter(
                 scanned += int(n_scanned)
                 tot_after_url += stats.get("after_url", 0)
                 tot_after_caption += stats.get("after_caption", 0)
-                tot_after_clip += stats.get("after_clip", 0)
                 tot_after_words += stats.get("after_words", 0)
 
                 if accepted >= target_samples:
@@ -435,7 +393,6 @@ def _filter(
                         f"accepted {accepted:>8,}  ({pct:.1f}%)  "
                         f"[pass: url {_pct(tot_after_url, scanned)}  "
                         f"cap {_pct(tot_after_caption, scanned)}  "
-                        f"clip {_pct(tot_after_clip, scanned)}  "
                         f"words {_pct(tot_after_words, scanned)}]"
                     )
 
@@ -470,10 +427,6 @@ def _filter(
     print(
         f"  has caption   {_pct(tot_after_caption, scanned):>7}"
         f"  ({tot_after_caption:,})"
-    )
-    print(
-        f"  clip>={clip_threshold:.2f}    "
-        f"{_pct(tot_after_clip, scanned):>7}  ({tot_after_clip:,})"
     )
     print(f"  word count    {_pct(tot_after_words, scanned):>7}  ({tot_after_words:,})")
     print(f"Written to {out_path}")
@@ -754,17 +707,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--clip-threshold",
-        type=float,
-        default=0.0,
-        help=(
-            "Minimum re_clip_score. Disabled (0.0) by default: re_clip_score "
-            "is 0.0 for every row in all train shards of this dataset — only "
-            "the tiny preview shard (used by the HF viewer) has real values. "
-            "Set to a positive value if a future dataset version populates it."
-        ),
-    )
-    parser.add_argument(
         "--min-caption-words",
         type=int,
         default=5,
@@ -798,7 +740,6 @@ def main() -> None:
     # ── column names ─────────────────────────────────────────────────────────
     parser.add_argument("--url-col", default=_DEFAULT_URL_COL)
     parser.add_argument("--caption-col", default=_DEFAULT_CAPTION_COL)
-    parser.add_argument("--clip-col", default=_DEFAULT_CLIP_COL)
     parser.add_argument("--uid-col", default=_DEFAULT_UID_COL)
 
     # ── download params ───────────────────────────────────────────────────────
@@ -881,12 +822,10 @@ def main() -> None:
         result = _filter(
             output_dir,
             target_samples=args.target_samples,
-            clip_threshold=args.clip_threshold,
             min_caption_words=args.min_caption_words,
             max_caption_words=args.max_caption_words,
             url_col=args.url_col,
             caption_col=args.caption_col,
-            clip_col=args.clip_col,
             uid_col=args.uid_col,
             num_workers=args.num_filter_workers,
             hf_token=hf_token,
