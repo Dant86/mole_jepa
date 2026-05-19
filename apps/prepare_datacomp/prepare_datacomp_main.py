@@ -70,6 +70,8 @@ _DEFAULT_IMG2DATASET_PROCESSES = 64  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
+# The "default" config has known conversion errors; condition_diverse_topk is clean.
+_DEFAULT_SUBSET = "condition_diverse_topk"
 
 # Default column names in UCSC-VLAA/Recap-DataComp-1B.
 _DEFAULT_URL_COL = "url"
@@ -122,7 +124,7 @@ def _install_preempt_handler() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _list_shards(token: str | None) -> list[str]:
+def _list_shards(token: str | None, subset: str) -> list[str]:
     """Return shuffled list of ``hf://`` parquet URLs in the dataset repo.
 
     Uses ``list_repo_files`` (direct Hub API) for discovery, which takes the
@@ -132,10 +134,12 @@ def _list_shards(token: str | None) -> list[str]:
 
     Args:
         token: HuggingFace auth token (can be ``None`` for public repos).
+        subset: Only return parquet files whose repo-relative path contains
+            this string.  Used to target a single dataset config and avoid
+            broken or irrelevant shards from other configs.
 
     Returns:
-        Shuffled list of ``hf://`` URLs, e.g.
-        ``["hf://datasets/UCSC-VLAA/Recap-DataComp-1B/data/train-00000.parquet", ...]``.
+        Shuffled list of ``hf://`` URLs filtered to *subset*.
     """
     from huggingface_hub import list_repo_files
 
@@ -152,9 +156,12 @@ def _list_shards(token: str | None) -> list[str]:
         if f.endswith(".parquet")
     ]
 
+    # Filter to the requested subset so broken configs are not touched.
+    parquet_paths = [p for p in parquet_paths if subset in p]
+
     if not parquet_paths:
         raise RuntimeError(
-            f"No parquet files found in {_DATASET_NAME}. "
+            f"No parquet files found for subset {subset!r} in {_DATASET_NAME}. "
             "Run with --list-columns to inspect the repo structure."
         )
 
@@ -175,7 +182,7 @@ def _filter_shard(
         str,  # clip_col
         str,  # uid_col
     ],
-) -> tuple[str, Any, Any]:
+) -> tuple[str, Any, Any, dict[str, int]]:
     """Read one parquet shard, apply quality filters, return accepted rows.
 
     This function runs inside a ``ThreadPoolExecutor`` worker thread.
@@ -187,10 +194,10 @@ def _filter_shard(
             ``ThreadPoolExecutor.submit``).
 
     Returns:
-        ``(hf_path, filtered_df, n_scanned)`` on success, or
-        ``(hf_path, None, None)`` if the shard could not be read.
-        The second element is a ``pandas.DataFrame`` or ``None``;
-        typed as ``Any`` to avoid a top-level pandas import.
+        ``(hf_path, filtered_df, n_scanned, stats)`` on success, or
+        ``(hf_path, None, None, {})`` if the shard could not be read.
+        *stats* keys: ``after_url``, ``after_caption``, ``after_clip``,
+        ``after_words`` — row counts surviving each successive filter.
     """
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
@@ -220,25 +227,40 @@ def _filter_shard(
         df = table.to_pandas()
     except Exception as exc:  # noqa: BLE001
         print(f"  WARNING: could not read {hf_path}: {exc}", file=sys.stderr)
-        return hf_path, None, None
+        return hf_path, None, None, {}
 
     n_scanned = len(df)
 
-    # ── quality filters ───────────────────────────────────────────────────
-    mask = df[url_col].notna() & (df[url_col] != "")
-    mask &= df[caption_col].notna() & (df[caption_col] != "")
-    mask &= df[clip_col].notna() & (df[clip_col].astype(float) >= clip_threshold)
-    df = df[mask]
+    # ── quality filters (each step tracked for diagnostics) ───────────────
+    df = df[df[url_col].notna() & (df[url_col] != "")]
+    after_url = len(df)
+
+    df = df[df[caption_col].notna() & (df[caption_col] != "")]
+    after_caption = len(df)
+
+    if clip_threshold > 0:
+        df = df[df[clip_col].notna() & (df[clip_col].astype(float) >= clip_threshold)]
+    after_clip = len(df)
 
     word_counts = df[caption_col].str.split().str.len()
-    df = df[(word_counts >= min_words) & (word_counts <= max_words)]
+    word_mask = word_counts >= min_words
+    if max_words > 0:
+        word_mask &= word_counts <= max_words
+    df = df[word_mask]
+    after_words = len(df)
 
     # Normalise column names for img2dataset / downstream use.
     df = df[[url_col, caption_col, uid_col]].rename(
         columns={caption_col: "caption", uid_col: "uid", url_col: "url"}
     )
 
-    return hf_path, df, n_scanned
+    stats = {
+        "after_url": after_url,
+        "after_caption": after_caption,
+        "after_clip": after_clip,
+        "after_words": after_words,
+    }
+    return hf_path, df, n_scanned, stats
 
 
 def _filter(
@@ -254,6 +276,7 @@ def _filter(
     uid_col: str,
     num_workers: int,
     hf_token: str | None,
+    subset: str,
 ) -> Path | None:
     """Stream Recap-DataComp-1B shards in parallel, filter, write Parquet.
 
@@ -277,6 +300,8 @@ def _filter(
         uid_col: Dataset column containing the unique sample identifier.
         num_workers: Parallel shard-reader threads.
         hf_token: HuggingFace auth token.
+        subset: Parquet path substring used to select the dataset config
+            (e.g. ``"condition_diverse_topk"``).
 
     Returns:
         Path to the written ``filtered.parquet`` file, or ``None`` if the
@@ -292,15 +317,15 @@ def _filter(
     tmp_path = out_path.with_suffix(".parquet.tmp")
     tmp_path.unlink(missing_ok=True)
 
-    print(f"Phase 1 — filtering {_DATASET_NAME}  (workers={num_workers})")
+    print(f"Phase 1 — filtering {_DATASET_NAME}/{subset}  (workers={num_workers})")
     print(
         f"  clip >= {clip_threshold}  |  "
         f"caption words: [{min_caption_words}, {max_caption_words}]  |  "
         f"target: {target_samples:,}"
     )
 
-    shards = _list_shards(hf_token)
-    print(f"  found {len(shards):,} parquet shards")
+    shards = _list_shards(hf_token, subset)
+    print(f"  found {len(shards):,} parquet shards in {subset!r}")
 
     schema = pa.schema(
         [
@@ -313,6 +338,11 @@ def _filter(
     accepted = 0
     scanned = 0
     shards_done = 0
+    # Running per-filter totals for diagnostics.
+    tot_after_url = 0
+    tot_after_caption = 0
+    tot_after_clip = 0
+    tot_after_words = 0
 
     writer = pq.ParquetWriter(str(tmp_path), schema, compression="snappy")
 
@@ -347,13 +377,17 @@ def _filter(
                     preempted = True
                     break
 
-                hf_path, df, n_scanned = future.result()
+                hf_path, df, n_scanned, stats = future.result()
                 shards_done += 1
 
                 if df is None or n_scanned is None:
                     continue
 
                 scanned += int(n_scanned)
+                tot_after_url += stats.get("after_url", 0)
+                tot_after_caption += stats.get("after_caption", 0)
+                tot_after_clip += stats.get("after_clip", 0)
+                tot_after_words += stats.get("after_words", 0)
 
                 if accepted >= target_samples:
                     continue  # drain remaining futures (don't write)
@@ -367,11 +401,22 @@ def _filter(
                 accepted += len(df)
 
                 pct = 100 * accepted / target_samples
-                print(
-                    f"  shard {shards_done:>5}/{len(shards):,}  "
-                    f"scanned {scanned:>12,}  "
-                    f"accepted {accepted:>10,}  ({pct:.1f}%)"
-                )
+                # Print a diagnostic line every 10 shards so filter
+                # rejection rates are visible without flooding the log.
+                if shards_done % 10 == 0 or accepted >= target_samples:
+
+                    def _pct(a: int, b: int) -> str:
+                        return f"{100 * a / b:.0f}%" if b else "n/a"
+
+                    print(
+                        f"  shard {shards_done:>5}/{len(shards):,}  "
+                        f"scanned {scanned:>10,}  "
+                        f"accepted {accepted:>8,}  ({pct:.1f}%)  "
+                        f"[pass: url {_pct(tot_after_url, scanned)}  "
+                        f"cap {_pct(tot_after_caption, scanned)}  "
+                        f"clip {_pct(tot_after_clip, scanned)}  "
+                        f"words {_pct(tot_after_words, scanned)}]"
+                    )
 
                 if accepted >= target_samples:
                     # Cancel pending futures — we have enough rows.
@@ -390,12 +435,26 @@ def _filter(
     # Atomic rename: only visible as the final path once fully written.
     os.replace(tmp_path, out_path)
 
+    def _pct(a: int, b: int) -> str:
+        return f"{100 * a / b:.1f}%" if b else "n/a"
+
     print(
         f"\nPhase 1 done — "
         f"shards processed: {shards_done:,}  "
         f"scanned: {scanned:,}  "
         f"accepted: {accepted:,}"
     )
+    print("Filter funnel (cumulative pass rate vs scanned):")
+    print(f"  has url       {_pct(tot_after_url, scanned):>7}  ({tot_after_url:,})")
+    print(
+        f"  has caption   {_pct(tot_after_caption, scanned):>7}"
+        f"  ({tot_after_caption:,})"
+    )
+    print(
+        f"  clip>={clip_threshold:.2f}    "
+        f"{_pct(tot_after_clip, scanned):>7}  ({tot_after_clip:,})"
+    )
+    print(f"  word count    {_pct(tot_after_words, scanned):>7}  ({tot_after_words:,})")
     print(f"Written to {out_path}")
     return out_path
 
@@ -653,6 +712,17 @@ def main() -> None:
         help="Root directory for filtered.parquet and shards/.",
     )
 
+    # ── dataset subset ───────────────────────────────────────────────────────
+    parser.add_argument(
+        "--subset",
+        default=_DEFAULT_SUBSET,
+        help=(
+            "Only read parquet files whose path contains this string. "
+            "Use to target a specific dataset config and skip broken ones. "
+            f"Default: {_DEFAULT_SUBSET!r}."
+        ),
+    )
+
     # ── filter params ────────────────────────────────────────────────────────
     parser.add_argument(
         "--target-samples",
@@ -667,8 +737,14 @@ def main() -> None:
     parser.add_argument(
         "--clip-threshold",
         type=float,
-        default=0.28,
-        help="Minimum CLIP ViT-L/14 image–text similarity score.",
+        default=0.2,
+        help=(
+            "Minimum re_clip_score (image vs LLaVA recaption). "
+            "LLaVA recaptions are long and verbose, so CLIP scores them "
+            "lower than short alt-text — 0.2 is a reasonable starting point. "
+            "Set to 0.0 to disable. Check the 'clip' column in the filter "
+            "funnel to tune."
+        ),
     )
     parser.add_argument(
         "--min-caption-words",
@@ -679,8 +755,12 @@ def main() -> None:
     parser.add_argument(
         "--max-caption-words",
         type=int,
-        default=200,
-        help="Reject captions longer than this many words.",
+        default=1000,
+        help=(
+            "Reject captions longer than this many words. "
+            "LLaVA recaptions are verbose paragraphs (often 200–500 words) "
+            "so the default is generous. Set to 0 to disable."
+        ),
     )
     parser.add_argument(
         "--num-filter-workers",
@@ -792,6 +872,7 @@ def main() -> None:
             uid_col=args.uid_col,
             num_workers=args.num_filter_workers,
             hf_token=hf_token,
+            subset=args.subset,
         )
         if result is None:
             # Preempted mid-Phase 1 — exit 99 for requeue.
