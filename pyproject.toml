@@ -35,16 +35,15 @@ data = [
     # Used by prepare_datacomp: metadata filtering and image download.
     "huggingface_hub>=0.23",  # HfFileSystem for direct parquet streaming
     "img2dataset>=1.41",
-    "imghdr",  # img2dataset uses imghdr, removed from stdlib in Python 3.13
+    "imghdr",  # vendored shim — see vendor/imghdr/ (removed from stdlib in Py 3.13)
     "pandas>=2.0",
     "pyarrow>=14.0",
 ]
 
-[tool.uv]
-# This project runs on Linux SLURM nodes only.  Restricting the resolution
-# environment avoids spurious "package not found" failures for packages (like
-# the imghdr stdlib-removal shim) that don't publish Windows wheels.
-environments = ["sys_platform == 'linux'"]
+[tool.uv.sources]
+# imghdr was removed from the Python stdlib in 3.13 (PEP 594) and has no
+# maintained PyPI release.  Use the vendored shim instead.
+imghdr = { path = "vendor/imghdr" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
