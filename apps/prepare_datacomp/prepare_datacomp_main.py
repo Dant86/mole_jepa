@@ -645,20 +645,16 @@ def _download(
     # LLaVA-recaptioned text that peaks at 100–150 GB RSS.
     chunks = _split_parquet(parquet_path, chunk_rows)
 
-    for chunk_idx, chunk_path in enumerate(chunks):
-        if _preempt_requested.is_set():
-            break
+    _WATCHDOG_POLL_S = 60
+    _WATCHDOG_STALL_S = 600  # 10 min without a new tar → deadlock
 
-        # Each chunk gets its own sub-directory so shard numbers don't
-        # collide across chunks.  WebDataset's recursive glob sees them all.
-        chunk_shards_dir = shards_dir / f"chunk_{chunk_idx:04d}"
-        chunk_shards_dir.mkdir(parents=True, exist_ok=True)
+    def _run_img2dataset(chunk_path: Path, chunk_shards_dir: Path) -> int:
+        """Start img2dataset for one chunk and return its exit code.
 
-        print(
-            f"\n  Chunk {chunk_idx + 1}/{len(chunks)}: {chunk_path.name} → "
-            f"{chunk_shards_dir}"
-        )
-
+        A watchdog thread monitors the shard directory.  If no new ``.tar``
+        files appear for ``_WATCHDOG_STALL_S`` seconds the process is killed
+        with SIGTERM and this function returns -15.
+        """
         cmd = [
             "img2dataset",
             "--url_list",
@@ -697,50 +693,121 @@ def _download(
             "False",
         ]
 
+        global _img2dataset_proc  # noqa: PLW0603
+
         stop_event = threading.Event()
         proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
         _img2dataset_proc = proc
+
+        def _watchdog(
+            p: subprocess.Popen,  # type: ignore[type-arg]
+            shard_dir: Path,
+            stop: threading.Event,
+        ) -> None:
+            last_count = len(list(shard_dir.rglob("*.tar")))
+            stalled_for = 0
+            while not stop.is_set():
+                stop.wait(timeout=_WATCHDOG_POLL_S)
+                if stop.is_set():
+                    break
+                count = len(list(shard_dir.rglob("*.tar")))
+                if count == last_count:
+                    stalled_for += _WATCHDOG_POLL_S
+                    if stalled_for >= _WATCHDOG_STALL_S:
+                        print(
+                            f"\n[watchdog] No new shards for {stalled_for}s "
+                            "— img2dataset appears deadlocked, sending SIGTERM.",
+                            flush=True,
+                        )
+                        try:
+                            p.terminate()
+                        except OSError:
+                            pass
+                        return
+                else:
+                    last_count = count
+                    stalled_for = 0
+
         monitor = threading.Thread(
             target=_monitor_storage,
             args=(shards_dir, limit_bytes, proc, stop_event),
             daemon=True,
         )
+        watchdog = threading.Thread(
+            target=_watchdog,
+            args=(proc, chunk_shards_dir, stop_event),
+            daemon=True,
+        )
         monitor.start()
+        watchdog.start()
 
-        returncode = proc.wait()
+        rc = proc.wait()
         _img2dataset_proc = None
         stop_event.set()
         monitor.join(timeout=5)
+        watchdog.join(timeout=5)
+        return rc
 
-        # Preemption: USR1 handler sent SIGTERM to img2dataset.
+    for chunk_idx, chunk_path in enumerate(chunks):
         if _preempt_requested.is_set():
-            used_gb = _shards_size_gb(shards_dir)
+            break
+
+        # Each chunk gets its own sub-directory so shard numbers don't
+        # collide across chunks.  WebDataset's recursive glob sees them all.
+        chunk_shards_dir = shards_dir / f"chunk_{chunk_idx:04d}"
+        chunk_shards_dir.mkdir(parents=True, exist_ok=True)
+
+        # Retry loop: if the watchdog kills img2dataset for a deadlock, restart
+        # it immediately (img2dataset resumes from the last completed shard).
+        while True:
+            if _preempt_requested.is_set():
+                break
+
             print(
-                f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
-                "img2dataset will resume from the last completed shard on next run.",
+                f"\n  Chunk {chunk_idx + 1}/{len(chunks)}: {chunk_path.name} → "
+                f"{chunk_shards_dir}",
                 flush=True,
             )
-            return True  # caller exits 99
+            returncode = _run_img2dataset(chunk_path, chunk_shards_dir)
 
-        # Storage guard: SIGTERM from the monitor thread.
-        if returncode in (-15, 143):
-            used_gb = _shards_size_gb(shards_dir)
-            print(
-                f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
-                f"(limit {storage_limit_gb:.0f} GB)."
-            )
-            return False
+            # Preemption.
+            if _preempt_requested.is_set():
+                used_gb = _shards_size_gb(shards_dir)
+                print(
+                    f"\n[preempt] Phase 2 stopped for requeue at {used_gb:.1f} GB. "
+                    "img2dataset will resume from the last completed shard on next run.",  # noqa: E501
+                    flush=True,
+                )
+                return True
 
-        if returncode != 0:
-            print(
-                f"\nimg2dataset exited with code {returncode}. "
-                f"Partial shards in {shards_dir} are safe to leave — "
-                "re-running resumes from the last completed shard.",
-                file=sys.stderr,
-            )
-            sys.exit(returncode)
+            # SIGTERM: either storage guard or watchdog.
+            if returncode in (-15, 143):
+                used_gb = _shards_size_gb(shards_dir)
+                if used_gb * 1e9 >= limit_bytes:
+                    print(
+                        f"\nPhase 2 stopped by storage guard at {used_gb:.1f} GB "
+                        f"(limit {storage_limit_gb:.0f} GB)."
+                    )
+                    return False
+                # Watchdog killed it — restart for the same chunk.
+                print(
+                    f"\n[watchdog] Restarting img2dataset for chunk "
+                    f"{chunk_idx + 1}/{len(chunks)}.",
+                    flush=True,
+                )
+                continue  # retry this chunk
 
-        print(f"  Chunk {chunk_idx + 1}/{len(chunks)} done.")
+            if returncode != 0:
+                print(
+                    f"\nimg2dataset exited with code {returncode}. "
+                    f"Partial shards in {shards_dir} are safe to leave — "
+                    "re-running resumes from the last completed shard.",
+                    file=sys.stderr,
+                )
+                sys.exit(returncode)
+
+            print(f"  Chunk {chunk_idx + 1}/{len(chunks)} done.", flush=True)
+            break  # success — move to next chunk
 
     if _preempt_requested.is_set():
         return True
