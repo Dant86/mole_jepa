@@ -71,7 +71,7 @@ _DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
-_DEFAULT_IMG2DATASET_PROCESSES = 4  # img2dataset --processes_count
+_DEFAULT_IMG2DATASET_PROCESSES = 16  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
@@ -516,13 +516,18 @@ def _split_parquet(parquet_path: Path, chunk_rows: int) -> list[Path]:
     of RSS.  Chunking keeps each img2dataset invocation well under the SLURM
     memory allocation.
 
+    ``pq.ParquetFile.iter_batches`` respects row-group boundaries and never
+    merges groups, so we accumulate row groups manually until we hit
+    ``chunk_rows``, then flush.
+
     Args:
         parquet_path: Path to the full filtered Parquet.
-        chunk_rows: Maximum rows per chunk.
+        chunk_rows: Target rows per chunk (last chunk may be smaller).
 
     Returns:
         List of chunk paths in order (may be just ``[parquet_path]``).
     """
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
     meta = pq.read_metadata(str(parquet_path))
@@ -530,31 +535,43 @@ def _split_parquet(parquet_path: Path, chunk_rows: int) -> list[Path]:
     if total_rows <= chunk_rows:
         return [parquet_path]
 
-    n_chunks = (total_rows + chunk_rows - 1) // chunk_rows
-    print(
-        f"  Splitting {total_rows:,} rows into {n_chunks} chunks "
-        f"of ≤{chunk_rows:,} rows each."
-    )
-
-    pf = pq.ParquetFile(str(parquet_path))
-    chunk_paths: list[Path] = []
     stem = parquet_path.stem
     out_dir = parquet_path.parent
+    chunk_paths: list[Path] = []
 
-    for i, batch in enumerate(pf.iter_batches(batch_size=chunk_rows)):
-        import pyarrow as pa
+    pending: list[pa.RecordBatch] = []
+    pending_rows = 0
 
-        chunk_path = out_dir / f"{stem}_chunk_{i:04d}.parquet"
+    def _flush(table: pa.Table) -> None:
+        idx = len(chunk_paths)
+        chunk_path = out_dir / f"{stem}_chunk_{idx:04d}.parquet"
         if not chunk_path.exists():
-            pq.write_table(
-                pa.Table.from_batches([batch]),
-                str(chunk_path),
-                compression="snappy",
-            )
-            print(f"  Wrote chunk {i:>3}/{n_chunks}: {chunk_path.name}")
-        else:
-            print(f"  Chunk {i:>3}/{n_chunks} already exists, skipping write.")
+            pq.write_table(table, str(chunk_path), compression="snappy")
         chunk_paths.append(chunk_path)
+
+    pf = pq.ParquetFile(str(parquet_path))
+    for batch in pf.iter_batches():
+        pending.append(batch)
+        pending_rows += len(batch)
+
+        while pending_rows >= chunk_rows:
+            combined = pa.Table.from_batches(pending)
+            _flush(combined.slice(0, chunk_rows))
+            remainder = combined.slice(chunk_rows)
+            pending = list(remainder.to_batches()) if len(remainder) else []
+            pending_rows = len(remainder)
+
+    if pending_rows:
+        _flush(pa.Table.from_batches(pending))
+
+    n_chunks = len(chunk_paths)
+    print(
+        f"  Split {total_rows:,} rows → {n_chunks} chunks "
+        f"of ≤{chunk_rows:,} rows  ({parquet_path.name})"
+    )
+    for i, p in enumerate(chunk_paths):
+        status = "wrote  " if p.stat().st_size > 0 else "exists "
+        print(f"    {status} chunk {i:>3}/{n_chunks}: {p.name}")
 
     return chunk_paths
 
