@@ -30,7 +30,7 @@
 #SBATCH --qos=general
 # No GPU needed — both phases are CPU + network.
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 # Maximum allowed wall time. Phase 2 downloads are resumable — the job
 # requeues automatically via exit code 99 until the corpus is complete.
 #SBATCH --time=12:00:00
@@ -56,6 +56,9 @@ export TOKENIZERS_PARALLELISM=false
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+# Suppress albumentations version-check HTTP requests — img2dataset spawns
+# 16 worker processes and each one fires this on import, adding noise to logs.
+export NO_ALBUMENTATIONS_UPDATE=1
 # Raise the open-file limit — img2dataset opens many sockets and tar files.
 ulimit -n 65536 2>/dev/null || true
 
