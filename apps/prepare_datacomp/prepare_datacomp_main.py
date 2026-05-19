@@ -41,9 +41,9 @@ Usage::
 Column names (run with --list-columns to inspect the first row)::
 
     --url-col       url             (image URL)
-    --caption-col   re_caption      (LLaVA synthetic caption)
-    --clip-col      clip_l14_score  (CLIP ViT-L/14 similarity)
-    --uid-col       uid             (unique sample identifier)
+    --caption-col   re_caption      (LLaVA-1.5 recaption)
+    --clip-col      re_clip_score   (CLIP score for the recaption)
+    --uid-col       key             (unique sample identifier)
 """
 
 import argparse
@@ -62,7 +62,7 @@ from typing import Any, cast
 # Constants
 # ---------------------------------------------------------------------------
 
-_DATASET_NAME = "mlfoundations/recap-datacomp-1b"
+_DATASET_NAME = "UCSC-VLAA/Recap-DataComp-1B"
 _SHARD_SIZE = 10_000  # images per WebDataset tar shard
 _RESIZE_PX = 256  # shorter edge; image processor crops to 224
 _DEFAULT_FILTER_WORKERS = 16  # parallel parquet-shard readers in Phase 1
@@ -71,11 +71,11 @@ _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
 
-# Default column names in mlfoundations/recap-datacomp-1b.
+# Default column names in UCSC-VLAA/Recap-DataComp-1B.
 _DEFAULT_URL_COL = "url"
 _DEFAULT_CAPTION_COL = "re_caption"
-_DEFAULT_CLIP_COL = "clip_l14_score"
-_DEFAULT_UID_COL = "uid"
+_DEFAULT_CLIP_COL = "re_clip_score"
+_DEFAULT_UID_COL = "key"
 
 
 # ---------------------------------------------------------------------------
