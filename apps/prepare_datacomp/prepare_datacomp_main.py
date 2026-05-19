@@ -2,10 +2,10 @@ r"""Filter Recap-DataComp-1B metadata and download images as WebDataset shards.
 
 Two-phase pipeline:
 
-1. **Filter** — list all parquet shards in the target subset of
-   ``UCSC-VLAA/Recap-DataComp-1B`` via ``HfFileSystem``, read only the
-   required columns (no full-file download), apply quality filters (caption
-   word count), and write a filtered Parquet to
+1. **Filter** — list all parquet shards in ``UCSC-VLAA/Recap-DataComp-1B``
+   (main branch, ``data/train_data/``) via ``HfFileSystem``, read only the
+   required columns (no full-file download), apply quality filters (CLIP
+   score + caption word count), and write a filtered Parquet to
    ``{output_dir}/filtered.parquet``.
    *N* shards are processed in parallel with a ``ThreadPoolExecutor``,
    which is I/O-bound (network reads) and releases the GIL for pandas work.
@@ -42,9 +42,12 @@ Usage::
 Column names (run with --list-columns to inspect the first row)::
 
     --url-col       url                                (image URL)
-    --caption-col   re_caption_condition_diverse_topk  (subset-specific recaption)
-    --clip-col      re_clip_score                      (CLIP score for the recaption)
+    --caption-col   re_caption_condition_diverse_topk  (diverse-condition recaption)
+    --clip-col      re_clip_score                      (CLIP similarity score)
     --uid-col       key                                (unique sample identifier)
+
+Note: always read from the **main branch** (``data/train_data/``).  The
+auto-generated ``refs/convert/parquet`` branch zeros out ``re_clip_score``.
 """
 
 import argparse
@@ -71,12 +74,9 @@ _DEFAULT_IMG2DATASET_PROCESSES = 64  # img2dataset --processes_count
 _DEFAULT_IMG2DATASET_THREADS = 64  # img2dataset --thread_count per process
 _DEFAULT_STORAGE_LIMIT_GB = 980.0  # terminate Phase 2 before filling the disk
 _STORAGE_POLL_INTERVAL_S = 30  # how often the monitor thread checks disk usage
-# The "default" config has known conversion errors; condition_diverse_topk is clean.
-_DEFAULT_SUBSET = "condition_diverse_topk"
-
-# Default column names in UCSC-VLAA/Recap-DataComp-1B (condition_diverse_topk).
-# The subset-specific caption is re_caption_condition_diverse_topk; it tends
-# to be longer and more detailed than the base re_caption.
+# Default column names in UCSC-VLAA/Recap-DataComp-1B.
+# Uses re_caption_condition_diverse_topk — the curated diverse-condition
+# recaption — which tends to be longer and more detailed than re_caption.
 _DEFAULT_URL_COL = "url"
 _DEFAULT_CAPTION_COL = "re_caption_condition_diverse_topk"
 _DEFAULT_CLIP_COL = "re_clip_score"
@@ -127,46 +127,43 @@ def _install_preempt_handler() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _list_shards(token: str | None, subset: str) -> list[str]:
+def _list_shards(token: str | None) -> list[str]:
     """Return shuffled list of ``hf://`` parquet URLs in the dataset repo.
 
-    Uses ``list_repo_files`` (direct Hub API) for discovery, which takes the
-    repo ID directly and avoids any filesystem path ambiguity.  Each returned
-    path is a full ``hf://datasets/{repo}/{file}`` URL ready for
-    ``pyarrow.parquet.read_table``.
+    Reads from the **main branch** (``data/train_data/``), which contains the
+    original parquet files with all columns populated — including real
+    ``re_clip_score`` values.
+
+    The ``refs/convert/parquet`` auto-conversion branch was previously used
+    but zeros out ``re_clip_score`` for every row and has ``condition_diverse_topk``
+    and ``default`` pointing to the identical tree, making subset selection
+    meaningless there.
 
     Args:
         token: HuggingFace auth token (can be ``None`` for public repos).
-        subset: Only return parquet files whose repo-relative path contains
-            this string.  Used to target a single dataset config and avoid
-            broken or irrelevant shards from other configs.
 
     Returns:
-        Shuffled list of ``hf://`` URLs filtered to *subset*.
+        Shuffled list of ``hf://datasets/{repo}/{file}`` URLs.
     """
     from huggingface_hub import list_repo_files
 
-    # The HF viewer (and the subset-organised parquet files) live on the
-    # auto-conversion branch, not main.  Files there are laid out as
-    # {config_name}/train/NNNNN.parquet, so filtering by subset name works.
     all_files = list(
         list_repo_files(
             _DATASET_NAME,
             repo_type="dataset",
-            revision="refs/convert/parquet",
+            revision="main",
             token=token,
         )
     )
     parquet_paths = [
-        f"hf://datasets/{_DATASET_NAME}@refs%2Fconvert%2Fparquet/{f}"
+        f"hf://datasets/{_DATASET_NAME}/{f}"
         for f in all_files
-        if f.endswith(".parquet") and subset in f
+        if f.startswith("data/train_data/") and f.endswith(".parquet")
     ]
 
     if not parquet_paths:
         raise RuntimeError(
-            f"No parquet files found for subset {subset!r} in {_DATASET_NAME} "
-            "(refs/convert/parquet). "
+            f"No parquet files found under data/train_data/ in {_DATASET_NAME}. "
             "Run with --list-columns to inspect the repo structure."
         )
 
@@ -303,7 +300,6 @@ def _filter(
     uid_col: str,
     num_workers: int,
     hf_token: str | None,
-    subset: str,
 ) -> Path | None:
     """Stream Recap-DataComp-1B shards in parallel, filter, write Parquet.
 
@@ -327,8 +323,6 @@ def _filter(
         uid_col: Dataset column containing the unique sample identifier.
         num_workers: Parallel shard-reader threads.
         hf_token: HuggingFace auth token.
-        subset: Parquet path substring used to select the dataset config
-            (e.g. ``"condition_diverse_topk"``).
 
     Returns:
         Path to the written ``filtered.parquet`` file, or ``None`` if the
@@ -344,15 +338,15 @@ def _filter(
     tmp_path = out_path.with_suffix(".parquet.tmp")
     tmp_path.unlink(missing_ok=True)
 
-    print(f"Phase 1 — filtering {_DATASET_NAME}/{subset}  (workers={num_workers})")
+    print(f"Phase 1 — filtering {_DATASET_NAME}  (workers={num_workers})")
     print(
         f"  clip >= {clip_threshold}  |  "
         f"caption words: [{min_caption_words}, {max_caption_words}]  |  "
         f"target: {target_samples:,}"
     )
 
-    shards = _list_shards(hf_token, subset)
-    print(f"  found {len(shards):,} parquet shards in {subset!r}")
+    shards = _list_shards(hf_token)
+    print(f"  found {len(shards):,} parquet shards in data/train_data/")
 
     schema = pa.schema(
         [
@@ -693,28 +687,30 @@ def _list_columns(hf_token: str | None) -> None:
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem, list_repo_files
 
-    _PARQUET_REV = "refs/convert/parquet"
-    print(f"Files in {_DATASET_NAME} (revision={_PARQUET_REV!r}):")
+    # Read from main branch — that's where the original parquet files live with
+    # real column values.  refs/convert/parquet is an auto-conversion that loses
+    # re_clip_score (zeroes it out) and shouldn't be used for inspection.
+    print(f"Files in {_DATASET_NAME} (revision='main', data/train_data/):")
     all_files = list(
         list_repo_files(
             _DATASET_NAME,
             repo_type="dataset",
-            revision=_PARQUET_REV,
+            revision="main",
             token=hf_token,
         )
     )
-    for f in all_files[:20]:
+    train_files = [f for f in all_files if f.startswith("data/train_data/")]
+    for f in train_files[:10]:
         print(f"  {f}")
-    if len(all_files) > 20:
-        print(f"  ... ({len(all_files)} total)")
+    if len(train_files) > 10:
+        print(f"  ... ({len(train_files)} total train shards)")
 
-    parquet_files = [f for f in all_files if f.endswith(".parquet")]
+    parquet_files = [f for f in train_files if f.endswith(".parquet")]
     if not parquet_files:
         print("\nNo parquet files found — check repo structure above.")
         return
 
-    _encoded_rev = _PARQUET_REV.replace("/", "%2F")
-    sample_url = f"hf://datasets/{_DATASET_NAME}@{_encoded_rev}/{parquet_files[0]}"
+    sample_url = f"hf://datasets/{_DATASET_NAME}/{parquet_files[0]}"
     print(f"\nSampling schema from {sample_url}:")
     fs = HfFileSystem(token=hf_token)
     schema = pq.read_schema(sample_url, filesystem=fs)
@@ -746,17 +742,6 @@ def main() -> None:
         help="Root directory for filtered.parquet and shards/.",
     )
 
-    # ── dataset subset ───────────────────────────────────────────────────────
-    parser.add_argument(
-        "--subset",
-        default=_DEFAULT_SUBSET,
-        help=(
-            "Only read parquet files whose path contains this string. "
-            "Use to target a specific dataset config and skip broken ones. "
-            f"Default: {_DEFAULT_SUBSET!r}."
-        ),
-    )
-
     # ── filter params ────────────────────────────────────────────────────────
     parser.add_argument(
         "--target-samples",
@@ -773,9 +758,9 @@ def main() -> None:
         type=float,
         default=0.2,
         help=(
-            "Minimum re_clip_score (image vs recaption). "
-            "LLaVA recaptions are verbose paragraphs, so CLIP scores them "
-            "lower than short alt-text — 0.2 is a reasonable floor. "
+            "Minimum re_clip_score (image vs recaption CLIP similarity). "
+            "The main-branch parquet files have real scores; 0.2 is a "
+            "reasonable floor for LLaVA-style verbose recaptions. "
             "Set to 0.0 to disable."
         ),
     )
@@ -905,7 +890,6 @@ def main() -> None:
             uid_col=args.uid_col,
             num_workers=args.num_filter_workers,
             hf_token=hf_token,
-            subset=args.subset,
         )
         if result is None:
             # Preempted mid-Phase 1 — exit 99 for requeue.
