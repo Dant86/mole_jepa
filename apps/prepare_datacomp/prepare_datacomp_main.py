@@ -463,7 +463,7 @@ def _filter(
 
 def _shards_size_gb(shards_dir: Path) -> float:
     """Return total size in GB of all completed ``.tar`` shards."""
-    return _shards_size_gb(shards_dir)
+    return sum(p.stat().st_size for p in shards_dir.rglob("*.tar")) / 1e9
 
 
 def _monitor_storage(
