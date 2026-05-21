@@ -112,10 +112,19 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ── data ──────────────────────────────────────────────────────────────────
+    _datacomp_shards = (
+        str(pathlib.Path(os.environ["DATACOMP_LOCAL_DIR"]) / "shards")
+        if "DATACOMP_LOCAL_DIR" in os.environ
+        else "pixparse/cc3m-wds"
+    )
     parser.add_argument(
         "--hf-dataset-name",
-        default="pixparse/cc3m-wds",
-        help="HuggingFace dataset identifier for the training set.",
+        default=_datacomp_shards,
+        help=(
+            "Local shard directory or HuggingFace dataset identifier. "
+            "Defaults to $DATACOMP_LOCAL_DIR/shards if set, "
+            "otherwise pixparse/cc3m-wds."
+        ),
     )
     parser.add_argument(
         "--hf-dataset-split",
