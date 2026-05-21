@@ -82,7 +82,8 @@ def build_datacomp_loader(
         tensors of shape ``(B, C, H, W)``, ``(B, L)``, ``(B, L)``.
     """
     image_transform = transforms.build_image_transform(
-        data_config.image_processor_model_name
+        data_config.image_processor_model_name,
+        train=shuffle,  # shuffle=True for train loader, False for val
     )
     tokenize = transforms.build_tokenizer(
         data_config.tokenizer_model_name, data_config.max_seq_length

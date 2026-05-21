@@ -12,6 +12,8 @@ from mole_jepa import config as config_module
 
 def build_image_transform(
     model_name: str,
+    train: bool = True,
+    crop_scale: tuple[float, float] = (0.4, 1.0),
 ) -> collections.abc.Callable[[PIL.Image.Image], torch.Tensor]:
     """Build an image transform using torchvision, parameterised by the model.
 
@@ -21,8 +23,30 @@ def build_image_transform(
     HuggingFace processor on every sample because torchvision runs its
     transforms in compiled C++ rather than Python/numpy.
 
+    **Training vs. validation transforms**
+
+    When ``train=True`` (default), a :class:`~torchvision.transforms.RandomResizedCrop`
+    and :class:`~torchvision.transforms.RandomHorizontalFlip` are applied so
+    that each epoch sees a different spatial view of every image.  This view
+    diversity is essential for vision-language pretraining — without it the
+    model effectively sees each image only once regardless of the number of
+    epochs.
+
+    ``crop_scale`` controls the trade-off between diversity and caption
+    fidelity.  Very small scales (e.g. ``(0.08, 1.0)``) are standard for
+    pure SSL but can crop away the captioned subject in image-text training.
+    ``(0.4, 1.0)`` is a reasonable default: enough spatial variation to
+    encourage invariance without frequently excluding the described content.
+
+    When ``train=False``, a deterministic ``Resize → CenterCrop`` is used so
+    validation metrics are reproducible.
+
     Args:
         model_name: HuggingFace model identifier for the image processor.
+        train: If ``True``, apply random crop + flip augmentation.
+        crop_scale: ``(min_scale, max_scale)`` for
+            :class:`~torchvision.transforms.RandomResizedCrop`.  Only used
+            when ``train=True``.
 
     Returns:
         A callable that maps a PIL image (RGB) to a ``(C, H, W)`` tensor.
@@ -48,10 +72,25 @@ def build_image_transform(
     mean: list[float] = list(processor.image_mean)
     std: list[float] = list(processor.image_std)
 
-    return T.Compose(
-        [
+    if train:
+        spatial: list[object] = [
+            T.RandomResizedCrop(
+                crop_to,
+                scale=crop_scale,
+                ratio=(0.75, 1.3333),
+                interpolation=T.InterpolationMode.BICUBIC,
+            ),
+            T.RandomHorizontalFlip(),
+        ]
+    else:
+        spatial = [
             T.Resize(resize_to, interpolation=T.InterpolationMode.BICUBIC),
             T.CenterCrop(crop_to),
+        ]
+
+    return T.Compose(
+        [
+            *spatial,
             T.ToTensor(),  # PIL [0,255] HWC → float [0,1] CHW
             T.Normalize(mean=mean, std=std),
         ]
