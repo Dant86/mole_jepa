@@ -20,10 +20,12 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
         image_encoder=models.ImageEncoder(
             model_name=config.image_encoder_model_name,
             embed_dim=config.embed_dim,
+            attn_implementation=config.attn_implementation,
         ),
         text_encoder=models.TextEncoder(
             model_name=config.text_encoder_model_name,
             embed_dim=config.embed_dim,
+            attn_implementation=config.attn_implementation,
         ),
         predictor=models.Predictor(
             embed_dim=config.embed_dim,

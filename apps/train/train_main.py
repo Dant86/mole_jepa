@@ -11,7 +11,7 @@ import pathlib
 import signal
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 import datasets as hf_datasets
 import torch
@@ -121,6 +121,17 @@ def parse_args() -> argparse.Namespace:
             "backward pass instead of storing them, reducing activation "
             "memory ~8× at a ~25%% compute overhead.  Allows larger batch "
             "sizes on memory-limited GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help=(
+            "JIT-compile the model with torch.compile (Triton/CUDA kernels). "
+            "Adds a one-time warmup cost on the first batch (~1–3 min) then "
+            "runs ~20–40%% faster.  Requires PyTorch >= 2.4 when combined "
+            "with --gradient-checkpointing."
         ),
     )
 
@@ -564,6 +575,12 @@ def main() -> None:
     device = _get_device()
     print(f"device: {device}")
 
+    # Allow TF32 for any float32 matmuls that slip through BF16 autocast
+    # (e.g. some HuggingFace ops that cast back to float32 internally).
+    # "high" uses TF32 on Ampere/Hopper tensor cores; no accuracy impact at
+    # the scale of vision-language pretraining.
+    torch.set_float32_matmul_precision("high")
+
     model_config, checkpoint_dir = resolve_entry(args)
     data_config = construct_data_config(args, model_config)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -628,11 +645,23 @@ def main() -> None:
         suffix = " (text encoder only — ViT is frozen)" if frozen else ""
         print(f"Gradient checkpointing enabled{suffix}")
 
+    # fused=True merges the optimizer step into a single CUDA kernel, cutting
+    # per-step overhead by ~5–10%.  Only available on CUDA.
+    use_fused = device.type == "cuda" and torch.cuda.is_available()
     optimizer: torch.optim.Optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
+        fused=use_fused,
     )
+
+    if args.compile:
+        # torch.compile traces the model into optimised Triton/CUDA kernels.
+        # The first forward pass is slow (kernel compilation); subsequent
+        # passes run ~20–40% faster.  Use --compile only after confirming the
+        # training loop is stable.
+        print("Compiling model with torch.compile …")
+        model = cast(models.MoLeJEPA, torch.compile(model))
 
     # ── resume detection ──────────────────────────────────────────────────────
     # Auto-resume if a train state exists in the registry-resolved directory.

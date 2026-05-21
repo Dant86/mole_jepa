@@ -41,6 +41,11 @@ class ModelConfig:
             projection head is always trained regardless of this flag.
             Motivated by VL-JEPA, which treats the vision encoder as a fixed
             semantic feature extractor.
+        attn_implementation: HuggingFace attention backend used for both
+            encoders.  ``"eager"`` is the safe default.  ``"sdpa"`` uses
+            PyTorch's scaled_dot_product_attention (free, usually faster).
+            ``"flash_attention_2"`` requires the ``flash-attn`` package and
+            gives the largest memory and throughput gains.
     """
 
     embed_dim: int = 256
@@ -57,6 +62,7 @@ class ModelConfig:
     jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07
     freeze_image_encoder: bool = True
+    attn_implementation: str = "sdpa"
 
     def serialize(self) -> str:
         """Serialize this config to a stable SHA-256 hex string.

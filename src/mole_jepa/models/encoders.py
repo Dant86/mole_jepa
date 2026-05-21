@@ -16,15 +16,22 @@ class ImageEncoder(nn.Module):
     Args:
         model_name: HuggingFace model identifier for the ViT.
         embed_dim: Output embedding dimension.
+        attn_implementation: HuggingFace attention backend, e.g.
+            ``"eager"`` (default), ``"sdpa"``, or ``"flash_attention_2"``.
+            Flash Attention 2 requires the ``flash-attn`` package and a
+            CUDA-capable GPU.
     """
 
     def __init__(
         self,
         model_name: str = "google/vit-base-patch16-224",
         embed_dim: int = 256,
+        attn_implementation: str = "eager",
     ) -> None:
         super().__init__()
-        self.vit = transformers.AutoModel.from_pretrained(model_name)
+        self.vit = transformers.AutoModel.from_pretrained(
+            model_name, attn_implementation=attn_implementation
+        )
         self.projection = nn.Linear(self.vit.config.hidden_size, embed_dim)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -61,15 +68,22 @@ class TextEncoder(nn.Module):
     Args:
         model_name: HuggingFace model identifier for the language model.
         embed_dim: Output embedding dimension.
+        attn_implementation: HuggingFace attention backend, e.g.
+            ``"eager"`` (default), ``"sdpa"``, or ``"flash_attention_2"``.
+            Flash Attention 2 requires the ``flash-attn`` package and a
+            CUDA-capable GPU.
     """
 
     def __init__(
         self,
         model_name: str = "bert-base-uncased",
         embed_dim: int = 256,
+        attn_implementation: str = "eager",
     ) -> None:
         super().__init__()
-        self.lm = transformers.AutoModel.from_pretrained(model_name)
+        self.lm = transformers.AutoModel.from_pretrained(
+            model_name, attn_implementation=attn_implementation
+        )
         self.projection = nn.Linear(self.lm.config.hidden_size, embed_dim)
 
     def forward(

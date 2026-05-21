@@ -67,6 +67,10 @@ uv sync
 # Pass --config NAME via "$@" at sbatch time, e.g.:
 #   sbatch scripts/train.sh --config vit_base_bert_jepa_frozen
 #
+# Once training is stable, add --compile for a further ~20-40% throughput
+# gain (torch.compile; first batch takes ~1-3 min to compile kernels):
+#   sbatch scripts/train.sh --config vit_base_bert_jepa_frozen --compile
+#
 # The checkpoint directory is resolved from the NFS registry entry for NAME —
 # no --checkpoint-dir flag is required.  Override with --checkpoint-dir if
 # you need to redirect a run to a different path.
