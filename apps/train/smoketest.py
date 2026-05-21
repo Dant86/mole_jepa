@@ -321,7 +321,23 @@ def _run_driver(args: argparse.Namespace) -> None:
             status = "TIMEOUT"
         else:
             if proc.returncode != 0:
-                status = "OOM/FAIL"
+                # Distinguish GPU OOM (Python exception, rc=1) from system
+                # RAM OOM (kernel SIGKILL, rc=-9) so we know which knob to turn.
+                stderr_tail = proc.stderr.strip().splitlines()
+                last_err = stderr_tail[-1] if stderr_tail else ""
+                gpu_oom = (
+                    "OutOfMemoryError" in proc.stderr
+                    or "CUDA out of memory" in proc.stderr
+                )
+                if gpu_oom:
+                    status = "GPU_OOM"
+                elif proc.returncode == -9:
+                    status = "SYS_OOM"
+                else:
+                    status = f"FAIL(rc={proc.returncode})"
+                # Print the final error line so it's visible in the log
+                if last_err:
+                    print(f"  ↳ {last_err}")
             else:
                 try:
                     # Take the last JSON line (subprocess may print warnings before it)
