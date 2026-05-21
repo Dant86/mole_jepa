@@ -1267,6 +1267,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchvision" },
     { name = "transformers" },
+    { name = "webdataset" },
 ]
 
 [package.dev-dependencies]
@@ -1296,6 +1297,7 @@ requires-dist = [
     { name = "torch" },
     { name = "torchvision" },
     { name = "transformers" },
+    { name = "webdataset" },
 ]
 
 [package.metadata.requires-dev]

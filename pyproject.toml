@@ -17,6 +17,7 @@ dependencies = [
     "torchvision",
     "plotly",
     "datasets",
+    "webdataset",
     "Pillow",
     "scipy",
     "transformers",

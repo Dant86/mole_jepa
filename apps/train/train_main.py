@@ -159,6 +159,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--val-shard-fraction",
+        type=float,
+        default=0.05,
+        help=(
+            "Fraction of WebDataset shards reserved for validation "
+            "(last N%% of the sorted shard list).  Only used when "
+            "--hf-dataset-name is a local directory.  Set to 0 to "
+            "skip validation entirely."
+        ),
+    )
+    parser.add_argument(
         "--max-seq-length",
         type=int,
         default=dcfg.max_seq_length,
@@ -243,24 +254,71 @@ def construct_data_config(
     )
 
 
+def _is_local_path(name: str) -> bool:
+    """Return ``True`` if *name* looks like a local filesystem path.
+
+    A name is treated as local when it starts with ``/``, ``./``, or ``~/``,
+    or when it resolves to an existing directory.  Everything else is assumed
+    to be a HuggingFace dataset identifier (e.g. ``pixparse/cc3m-wds``).
+
+    Args:
+        name: The ``--hf-dataset-name`` value from the CLI.
+
+    Returns:
+        ``True`` for local paths, ``False`` for HF identifiers.
+    """
+    return (
+        name.startswith("/")
+        or name.startswith("./")
+        or name.startswith("~/")
+        or pathlib.Path(name).expanduser().is_dir()
+    )
+
+
 def build_loader(
     dataset_name: str,
     split: str,
     data_config: config_module.DataConfig,
     device: torch.device,
+    *,
+    tar_paths: list[str] | None = None,
+    shuffle: bool = True,
 ) -> torch.utils.data.DataLoader:  # type: ignore[type-arg]
-    """Stream a HuggingFace dataset split and wrap it in a :class:`DataLoader`.
+    """Stream a dataset and wrap it in a :class:`DataLoader`.
+
+    Automatically selects the backend based on *dataset_name*:
+
+    * **Local path** — if *dataset_name* is a directory (absolute, ``./``,
+      or ``~/`` prefix, or an existing path), the WebDataset backend is used.
+      Pass a pre-computed *tar_paths* list to specify exactly which shards to
+      load (e.g. for a train/val split); if omitted, all shards under
+      *dataset_name* are used.
+
+    * **HuggingFace identifier** — otherwise the dataset is streamed via
+      :func:`datasets.load_dataset` and wrapped in
+      :class:`~mole_jepa.data.CC3MDataset`.
 
     Args:
-        dataset_name: HuggingFace dataset identifier.
-        split: Dataset split name.
+        dataset_name: HF dataset identifier *or* local shard directory.
+        split: Dataset split name (only used for the HF backend).
         data_config: Data configuration for transforms and batch sizing.
-        device: Training device (used to enable ``pin_memory`` for CUDA).
+        device: Training device (enables ``pin_memory`` for CUDA).
+        tar_paths: Explicit shard list for the WebDataset backend.  Ignored
+            when using the HF backend.
+        shuffle: Whether to shuffle shards and samples.  Pass ``False`` for
+            the validation loader.
 
     Returns:
         A :class:`DataLoader` yielding ``(pixel_values, input_ids,
         attention_mask)`` triples.
     """
+    if _is_local_path(dataset_name):
+        paths = tar_paths or data_module.find_tar_shards(dataset_name)
+        print(f"  WebDataset: {len(paths):,} shards from {dataset_name}")
+        return data_module.build_datacomp_loader(
+            paths, data_config, device, shuffle=shuffle
+        )
+
     hf_ds = hf_datasets.load_dataset(dataset_name, split=split, streaming=True)
     dataset = data_module.CC3MDataset(hf_ds, data_config)
     return torch.utils.data.DataLoader(
@@ -487,14 +545,40 @@ def main() -> None:
     # at first iteration, so creating them here ensures they don't inherit the
     # CUDA context — each inherited CUDA context costs ~1.5 GB of address space
     # and SLURM counts it against the job's --mem budget even with fork CoW.
+    train_dataset_name = args.hf_dataset_name
+    val_dataset_name = args.val_hf_dataset_name or args.hf_dataset_name
+
+    # For local WebDataset directories, split the shard list once so that
+    # train and val always see disjoint shards regardless of which path is
+    # passed for each.
+    train_tar_paths: list[str] | None = None
+    val_tar_paths: list[str] | None = None
+    if _is_local_path(train_dataset_name):
+        all_shards = data_module.find_tar_shards(train_dataset_name)
+        train_tar_paths, val_tar_paths = data_module.split_shards(
+            all_shards, args.val_shard_fraction
+        )
+        print(
+            f"Shard split: {len(train_tar_paths):,} train  "
+            f"{len(val_tar_paths):,} val  "
+            f"(val_fraction={args.val_shard_fraction})"
+        )
+
     loader = build_loader(
-        args.hf_dataset_name, args.hf_dataset_split, data_config, device
+        train_dataset_name,
+        args.hf_dataset_split,
+        data_config,
+        device,
+        tar_paths=train_tar_paths,
+        shuffle=True,
     )
     val_loader = build_loader(
-        args.val_hf_dataset_name or args.hf_dataset_name,
+        val_dataset_name,
         args.val_hf_dataset_split,
         data_config,
         device,
+        tar_paths=val_tar_paths if val_tar_paths else None,
+        shuffle=False,
     )
 
     model, loss_fn = factory.build(model_config)
