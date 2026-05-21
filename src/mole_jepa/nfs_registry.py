@@ -49,11 +49,12 @@ Usage::
 
 import dataclasses
 import datetime
-import fcntl
 import json
 import os
 import pathlib
 from typing import Any
+
+from filelock import FileLock
 
 from mole_jepa import config as config_module
 
@@ -102,33 +103,21 @@ def _lock_path(registry_dir: str | pathlib.Path) -> pathlib.Path:
     return pathlib.Path(registry_dir) / _LOCK_FILE
 
 
-class _Lock:
-    """Exclusive NFS advisory lock via ``fcntl.flock``.
+def _registry_lock(registry_dir: str | pathlib.Path) -> FileLock:
+    """Return an exclusive ``FileLock`` for the registry sidecar file.
 
-    Opens (or creates) a sidecar ``.lock`` file and holds ``LOCK_EX`` for
-    the duration of the ``with`` block.  ``fcntl.flock`` is not fully
-    reliable on all NFS implementations, but is the standard approach on
-    modern Linux NFS mounts and all major SLURM cluster filesystems.
+    Uses ``filelock.FileLock``, which calls ``fcntl.flock`` on POSIX — the
+    standard advisory lock on modern Linux NFS4 mounts used by SLURM clusters.
+    The lock directory is created if it does not already exist.
 
-    Note:
-        This module is POSIX-only (``fcntl`` is not available on Windows).
+    Args:
+        registry_dir: Path to the registry directory on NFS.
+
+    Returns:
+        A :class:`filelock.FileLock` context manager.
     """
-
-    def __init__(self, registry_dir: str | pathlib.Path) -> None:
-        self._path = _lock_path(registry_dir)
-        pathlib.Path(registry_dir).mkdir(parents=True, exist_ok=True)
-        self._fh: Any = None
-
-    def __enter__(self) -> _Lock:
-        self._fh = open(self._path, "w")  # noqa: SIM115
-        fcntl.flock(self._fh, fcntl.LOCK_EX)
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        if self._fh is not None:
-            fcntl.flock(self._fh, fcntl.LOCK_UN)
-            self._fh.close()
-            self._fh = None
+    pathlib.Path(registry_dir).mkdir(parents=True, exist_ok=True)
+    return FileLock(_lock_path(registry_dir))
 
 
 def _load(registry_dir: str | pathlib.Path) -> dict[str, Any]:
@@ -323,7 +312,7 @@ def register(
     else:
         resolved_dir = pathlib.Path(checkpoint_base) / config.serialize()  # type: ignore[arg-type]
 
-    with _Lock(registry_dir):
+    with _registry_lock(registry_dir):
         data = _load(registry_dir)
         if name in data["models"] and not overwrite:
             raise ValueError(
@@ -358,7 +347,7 @@ def deregister(
     Raises:
         KeyError: If *name* is not in the registry.
     """
-    with _Lock(registry_dir):
+    with _registry_lock(registry_dir):
         data = _load(registry_dir)
         if name not in data["models"]:
             raise KeyError(f"Model {name!r} not found in registry at {registry_dir!r}.")

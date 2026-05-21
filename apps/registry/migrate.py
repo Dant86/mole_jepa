@@ -42,7 +42,7 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from mole_jepa.nfs_registry import _load, _Lock, _save  # noqa: E402
+from mole_jepa.nfs_registry import _load, _registry_lock, _save  # noqa: E402
 
 
 def _discover_migrations(
@@ -84,7 +84,7 @@ def run_pending(
     migrations_dir = pathlib.Path(__file__).parent / "migrations"
     all_migrations = _discover_migrations(migrations_dir)
 
-    with _Lock(registry_dir):
+    with _registry_lock(registry_dir):
         data = _load(registry_dir)
         current = int(data.get("schema_version", 0))
 
