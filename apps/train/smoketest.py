@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import subprocess
 import sys
 import time
@@ -43,6 +44,26 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # ── model / registry ──────────────────────────────────────────────────────
+    parser.add_argument(
+        "--config",
+        required=True,
+        metavar="NAME",
+        help=(
+            "Named model config from the NFS registry.  The model is loaded "
+            "and a real forward+backward pass is run per batch so that GPU "
+            "memory pressure is realistic for this specific architecture."
+        ),
+    )
+    parser.add_argument(
+        "--registry-path",
+        default=os.environ.get("REGISTRY_PATH"),
+        metavar="DIR",
+        help=(
+            "Registry directory containing registry.json. Defaults to $REGISTRY_PATH."
+        ),
     )
 
     # ── data ──────────────────────────────────────────────────────────────────
@@ -114,6 +135,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--_prefetch", type=int, dest="w_prefetch", help=argparse.SUPPRESS
     )
+    parser.add_argument("--_config", dest="w_config", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--_registry-path", dest="w_registry_path", help=argparse.SUPPRESS
+    )
 
     return parser.parse_args()
 
@@ -124,16 +149,29 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _run_worker(args: argparse.Namespace) -> None:
+    """Run one (batch_size, num_workers, prefetch) configuration.
+
+    Loads the real model from the registry and runs a full forward+backward
+    pass per batch so that GPU memory pressure matches actual training.
+    Prints a JSON result line on success; exits non-zero on OOM.
+    """
     import torch
 
     from mole_jepa import config as config_module
     from mole_jepa import data as data_module
+    from mole_jepa import factory, nfs_registry
 
     batch_size = args.w_batch_size
     num_workers = args.w_num_workers
     prefetch = args.w_prefetch
 
+    # ── resolve model config from registry ────────────────────────────────────
+    entry = nfs_registry.get_entry(args.w_config, args.w_registry_path)
+    model_config = entry.config
+
     data_cfg = config_module.DataConfig(
+        image_processor_model_name=model_config.image_encoder_model_name,
+        tokenizer_model_name=model_config.text_encoder_model_name,
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch,
@@ -141,25 +179,61 @@ def _run_worker(args: argparse.Namespace) -> None:
         caption_field=args.caption_field,
     )
 
-    shards = data_module.find_tar_shards(args.hf_dataset_name)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # ── build model (same as train_main.py) ───────────────────────────────────
+    model, loss_fn = factory.build(model_config)
+    model = model.to(device)
+    loss_fn = loss_fn.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    amp_ctx = torch.amp.autocast(
+        device.type,
+        dtype=torch.bfloat16,
+        enabled=(device.type == "cuda"),
+    )
+
+    # ── build data loader ─────────────────────────────────────────────────────
+    shards = data_module.find_tar_shards(args.hf_dataset_name)
     loader = data_module.build_datacomp_loader(shards, data_cfg, device, shuffle=False)
 
+    # ── timed loop ────────────────────────────────────────────────────────────
     total_batches = args.warmup_batches + args.num_batches
     samples_timed = 0
     t0: float | None = None
 
-    for i, (pv, _ids, _mask) in enumerate(loader):
+    model.train()
+    for i, batch in enumerate(loader):
         if i >= total_batches:
             break
-        if i == args.warmup_batches:
-            t0 = time.monotonic()
-        if t0 is not None:
-            # Move to device — tests pin_memory / H2D transfer
-            pv.to(device, non_blocking=True)
-            samples_timed += pv.shape[0]
 
+        pixel_values, input_ids, attention_mask = batch
+        pixel_values = pixel_values.to(device)
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+
+        with amp_ctx:
+            output = model(pixel_values, input_ids, attention_mask)
+            raw = loss_fn(output)
+            # JEPALoss returns a dataclass with a .loss tensor; InfoNCE returns
+            # the tensor directly.
+            loss = raw.loss if hasattr(raw, "loss") else raw
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if i == args.warmup_batches:
+            # Start the clock after warmup so one-time costs don't skew results
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.monotonic()
+
+        if t0 is not None:
+            samples_timed += pixel_values.shape[0]
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     elapsed = (time.monotonic() - t0) if t0 is not None else 0.0
     sps = samples_timed / elapsed if elapsed > 0 else 0.0
 
@@ -175,6 +249,18 @@ def _run_driver(args: argparse.Namespace) -> None:
     configs = list(
         itertools.product(args.batch_sizes, args.worker_counts, args.prefetch_factors)
     )
+
+    n_configs = (
+        len(args.batch_sizes) * len(args.worker_counts) * len(args.prefetch_factors)
+    )
+    n_batches_each = args.warmup_batches + args.num_batches
+    print(f"Sweeping configs for model: {args.config}")
+    print(
+        f"  {n_configs} configurations"
+        f"  ×  {n_batches_each} batches each"
+        f"  (timeout {args.timeout}s per config)"
+    )
+    print()
 
     col = dict(batch=8, workers=7, prefetch=8, sps=14, status=8)
     hdr = (
@@ -194,6 +280,10 @@ def _run_driver(args: argparse.Namespace) -> None:
         cmd = [
             sys.executable,
             str(Path(__file__).resolve()),
+            "--config",
+            args.config,
+            "--registry-path",
+            args.registry_path,
             "--hf-dataset-name",
             args.hf_dataset_name,
             "--image-field",
@@ -211,6 +301,10 @@ def _run_driver(args: argparse.Namespace) -> None:
             str(num_workers),
             "--_prefetch",
             str(prefetch),
+            "--_config",
+            args.config,
+            "--_registry-path",
+            args.registry_path,
         ]
 
         status = "?"

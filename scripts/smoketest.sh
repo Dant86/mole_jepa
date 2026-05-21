@@ -46,17 +46,25 @@ exec > "${LOG_DIR}/smoketest_${SLURM_JOB_ID}.out" \
 uv sync
 
 # ── sweep ─────────────────────────────────────────────────────────────────────
+# The optimal settings depend on model size: a tiny model leaves more room for
+# larger batches, while a big model shrinks the VRAM headroom.  Pass --config
+# to load the real model and run genuine forward+backward passes.
+#
+# Required: pass --config at sbatch time, e.g.:
+#   sbatch scripts/smoketest.sh --config vit_base_bert_jepa_frozen
+#
 # Each configuration runs in an isolated subprocess. If the kernel OOM-kills
 # a subprocess its exit code is non-zero and it is marked FAIL/OOM.
-# The sweep goes from smallest to largest so the table is readable top-to-bottom.
-#
-# Override any dimension at submission time, e.g.:
-#   sbatch scripts/smoketest.sh  # (no overrides needed — defaults are sensible)
-#
-# Pass extra smoketest.py flags after "--" if needed:
-#   sbatch scripts/smoketest.sh --batch-sizes 1024 2048
+# The sweep goes from smallest to largest; pick the best OK row for train.sh.
+
+if [[ "$*" != *"--config"* ]]; then
+    echo "ERROR: --config NAME is required. Example:" >&2
+    echo "  sbatch scripts/smoketest.sh --config vit_base_bert_jepa_frozen" >&2
+    exit 1
+fi
 
 uv run python apps/train/smoketest.py \
+    --registry-path     "${REGISTRY_PATH}" \
     --hf-dataset-name   "${DATACOMP_LOCAL_DIR}/shards" \
     --image-field       jpg \
     --caption-field     txt \
