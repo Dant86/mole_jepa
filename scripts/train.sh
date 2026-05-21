@@ -104,10 +104,8 @@ setsid uv run python apps/train/train_main.py \
     --batch-size           1024 \
     --num-workers          4 \
     --max-seq-length       64 \
-    --hf-dataset-name      "${CC3M_LOCAL_DIR}/train" \
-    --hf-dataset-split     train \
-    --val-hf-dataset-name  "${CC3M_LOCAL_DIR}/validation" \
-    --val-hf-dataset-split validation \
+    --hf-dataset-name      "${DATACOMP_LOCAL_DIR}/shards" \
+    --val-shard-fraction   0.05 \
     --image-field          jpg \
     --caption-field        txt \
     "$@" &
