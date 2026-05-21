@@ -1,5 +1,7 @@
 """Image and text encoders for MoLeJEPA."""
 
+import contextlib
+
 import torch
 import transformers
 from torch import nn
@@ -28,13 +30,25 @@ class ImageEncoder(nn.Module):
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Encode a batch of images.
 
+        When the ViT backbone is frozen (all parameters have
+        ``requires_grad=False``) the forward pass is wrapped in
+        :func:`torch.no_grad` so that the 12-layer activation stack is freed
+        layer-by-layer rather than being kept alive until the call returns.
+        Without this, the full residual stream across all layers stays in VRAM
+        even though none of it is needed for the backward pass.
+
         Args:
             pixel_values: Float tensor of shape `(B, C, H, W)`.
 
         Returns:
             Embedding tensor of shape `(B, embed_dim)`.
         """
-        cls = self.vit(pixel_values=pixel_values).last_hidden_state[:, 0]
+        vit_frozen = not next(self.vit.parameters()).requires_grad
+        ctx: contextlib.AbstractContextManager = (
+            torch.no_grad() if vit_frozen else contextlib.nullcontext()
+        )
+        with ctx:
+            cls = self.vit(pixel_values=pixel_values).last_hidden_state[:, 0]
         return self.projection(cls)
 
 

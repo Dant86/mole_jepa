@@ -111,6 +111,18 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Max gradient norm for clipping (0 disables).",
     )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable gradient checkpointing on the text encoder (and image "
+            "encoder if not frozen).  Recomputes activations during the "
+            "backward pass instead of storing them, reducing activation "
+            "memory ~8× at a ~25%% compute overhead.  Allows larger batch "
+            "sizes on memory-limited GPUs."
+        ),
+    )
 
     # ── data ──────────────────────────────────────────────────────────────────
     parser.add_argument(
@@ -604,6 +616,17 @@ def main() -> None:
     model, loss_fn = factory.build(model_config)
     model = model.to(device)
     loss_fn = loss_fn.to(device)
+
+    if args.gradient_checkpointing:
+        # Enable gradient checkpointing on every trainable transformer encoder.
+        # This recomputes activations during the backward pass instead of storing
+        # all of them, cutting activation memory ~8× at ~25% compute overhead.
+        model.text_encoder.lm.gradient_checkpointing_enable()
+        if not model_config.freeze_image_encoder:
+            model.image_encoder.vit.gradient_checkpointing_enable()
+        frozen = model_config.freeze_image_encoder
+        suffix = " (text encoder only — ViT is frozen)" if frozen else ""
+        print(f"Gradient checkpointing enabled{suffix}")
 
     optimizer: torch.optim.Optimizer = torch.optim.AdamW(
         model.parameters(),

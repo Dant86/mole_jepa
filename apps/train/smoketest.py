@@ -102,6 +102,18 @@ def _parse_args() -> argparse.Namespace:
         help="prefetch_factor values to sweep (default: 2 4).",
     )
 
+    # ── training options ──────────────────────────────────────────────────────
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable gradient checkpointing on trainable encoders. "
+            "Pass this if you intend to use it in train.sh so the sweep "
+            "reflects the actual memory budget."
+        ),
+    )
+
     # ── timing ────────────────────────────────────────────────────────────────
     parser.add_argument(
         "--warmup-batches",
@@ -186,6 +198,11 @@ def _run_worker(args: argparse.Namespace) -> None:
     model = model.to(device)
     loss_fn = loss_fn.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    if args.gradient_checkpointing:
+        model.text_encoder.lm.gradient_checkpointing_enable()
+        if not model_config.freeze_image_encoder:
+            model.image_encoder.vit.gradient_checkpointing_enable()
 
     amp_ctx = torch.amp.autocast(
         device.type,
@@ -306,6 +323,8 @@ def _run_driver(args: argparse.Namespace) -> None:
             "--_registry-path",
             args.registry_path,
         ]
+        if args.gradient_checkpointing:
+            cmd.append("--gradient-checkpointing")
 
         status = "?"
         sps: float | None = None

@@ -98,6 +98,7 @@ trap on_term TERM
 setsid uv run python apps/train/train_main.py \
     --registry-path        "${REGISTRY_PATH}" \
     --num-epochs           100 \
+    --gradient-checkpointing \
     --lr                   1e-4 \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
