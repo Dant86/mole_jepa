@@ -13,7 +13,7 @@
 #SBATCH --qos=general
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=192G
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
@@ -98,12 +98,12 @@ trap on_term TERM
 setsid uv run python apps/train/train_main.py \
     --registry-path        "${REGISTRY_PATH}" \
     --num-epochs           100 \
-    --lr                   2e-4 \
+    --lr                   1e-4 \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
-    --batch-size           2048 \
+    --batch-size           1024 \
     --num-workers          12 \
-    --prefetch-factor      2 \
+    --prefetch-factor      4 \
     --max-seq-length       64 \
     --hf-dataset-name      "${DATACOMP_LOCAL_DIR}/shards" \
     --val-shard-fraction   0.05 \
