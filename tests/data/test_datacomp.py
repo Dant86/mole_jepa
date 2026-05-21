@@ -228,7 +228,7 @@ class TestBuildDatacompLoader:
         pipeline = self._patch_pipeline()
 
         # Intercept the callable passed to pipeline.map().
-        def _capture_map(fn):  # type: ignore[no-untyped-def]
+        def _capture_map(fn, **_kwargs):  # type: ignore[no-untyped-def]
             captured_fn.append(fn)
             return pipeline
 
@@ -284,7 +284,7 @@ class TestBuildDatacompLoader:
         captured_fn: list = []
         pipeline = self._patch_pipeline()
 
-        def _capture_map(fn):  # type: ignore[no-untyped-def]
+        def _capture_map(fn, **_kwargs):  # type: ignore[no-untyped-def]
             captured_fn.append(fn)
             return pipeline
 

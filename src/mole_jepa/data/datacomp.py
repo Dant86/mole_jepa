@@ -113,12 +113,17 @@ def build_datacomp_loader(
         tar_paths,
         shardshuffle=shuffle,
         nodesplitter=wds.split_by_node,
-    ).decode("pil")
+        # Skip corrupt or truncated tars rather than crashing the job.
+        # warn_and_continue logs a warning and moves to the next shard.
+        handler=wds.warn_and_continue,
+    ).decode("pil", handler=wds.warn_and_continue)
 
     if shuffle:
         pipeline = pipeline.shuffle(shuffle_buffer)  # type: ignore[union-attr]
 
-    dataset = pipeline.map(_preprocess)  # type: ignore[union-attr]
+    # Pass handler here too so a bad JPEG inside an otherwise-valid tar is
+    # skipped rather than aborting the epoch.
+    dataset = pipeline.map(_preprocess, handler=wds.warn_and_continue)  # type: ignore[union-attr]
 
     return torch.utils.data.DataLoader(
         dataset,  # type: ignore[arg-type]
