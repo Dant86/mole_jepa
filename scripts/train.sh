@@ -13,7 +13,7 @@
 #SBATCH --qos=general
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=192G
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
