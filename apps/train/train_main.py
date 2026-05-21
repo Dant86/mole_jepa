@@ -10,6 +10,7 @@ import os
 import pathlib
 import signal
 import sys
+import time
 from typing import Any
 
 import datasets as hf_datasets
@@ -481,6 +482,10 @@ def run_epoch(
     model.train(train)
     totals: dict[str, float] = {}
     n_batches = 0
+    batch_size: int = loader.batch_size or 1  # type: ignore[assignment]
+
+    epoch_t0 = time.monotonic()
+    interval_t0 = epoch_t0
 
     # BF16 autocast on CUDA: halves activation memory and uses tensor-core throughput.
     # No GradScaler needed — BF16 has the same exponent range as float32.
@@ -511,13 +516,28 @@ def run_epoch(
             n_batches += 1
 
             if train and (batch_idx + 1) % log_interval == 0:
+                now = time.monotonic()
+                samples_per_sec = (log_interval * batch_size) / (now - interval_t0)
+                interval_t0 = now
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
                 parts = "  ".join(f"{k} {v:.4f}" for k, v in components.items())
-                print(f"epoch {epoch:>3}  step {batch_idx + 1:>6}  {parts}")
+                print(
+                    f"[{ts}]  epoch {epoch:>3}  step {batch_idx + 1:>6}"
+                    f"  {parts}  samples/s {samples_per_sec:,.0f}"
+                )
 
+    elapsed = time.monotonic() - epoch_t0
+    elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
+    avg_samples_per_sec = (n_batches * batch_size) / elapsed if elapsed > 0 else 0.0
     label = "train" if train else "val  "
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
     avgs = {k: v / max(n_batches, 1) for k, v in totals.items()}
     parts = "  ".join(f"{k} {v:.4f}" for k, v in avgs.items())
-    print(f"epoch {epoch:>3}  {label}  {parts}  batches {n_batches}")
+    print(
+        f"[{ts}]  epoch {epoch:>3}  {label}  {parts}"
+        f"  batches {n_batches}  elapsed {elapsed_str}"  # noqa: E501
+        f"  samples/s {avg_samples_per_sec:,.0f}"
+    )
     return avgs, n_batches
 
 
