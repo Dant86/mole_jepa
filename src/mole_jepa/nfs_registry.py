@@ -52,6 +52,7 @@ import datetime
 import json
 import os
 import pathlib
+from collections.abc import Callable
 from typing import Any
 
 from filelock import FileLock
@@ -352,4 +353,30 @@ def deregister(
         if name not in data["models"]:
             raise KeyError(f"Model {name!r} not found in registry at {registry_dir!r}.")
         del data["models"][name]
+        _save(data, registry_dir)
+
+
+def apply_migration(
+    registry_dir: str | pathlib.Path,
+    up_fn: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    """Apply a schema-migration function to the raw registry data under a lock.
+
+    The entire read-transform-write cycle is protected by an exclusive
+    :func:`filelock.FileLock` so concurrent callers cannot interleave.
+    This is the only public entry point that grants access to the raw
+    registry dict; it exists solely for ``apps/registry/migrate.py``.
+
+    The *up_fn* receives the full registry dict (including ``schema_version``
+    and ``models``) and must return the transformed dict.  It is responsible
+    for bumping ``data["schema_version"]`` as appropriate.
+
+    Args:
+        registry_dir: Path to the registry directory on NFS.
+        up_fn: Pure function ``dict → dict`` that applies one or more
+            schema migrations.  Called exactly once, inside the lock.
+    """
+    with _registry_lock(registry_dir):
+        data = _load(registry_dir)
+        data = up_fn(data)
         _save(data, registry_dir)

@@ -284,7 +284,7 @@ class TestDeregister:
 
 
 # ---------------------------------------------------------------------------
-# TestAtomicWrite
+# TestAtomicWrite / TestApplyMigration
 # ---------------------------------------------------------------------------
 
 
@@ -299,6 +299,59 @@ class TestAtomicWrite:
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == []
 
+
+class TestApplyMigration:
+    def test_up_fn_receives_and_returns_raw_dict(self, tmp_path: pathlib.Path) -> None:
+        nfs_registry.register(
+            "m",
+            config=_cfg(),
+            checkpoint_dir="/tmp/m",
+            registry_dir=tmp_path,
+        )
+        received: list[dict] = []
+
+        def up(data: dict) -> dict:
+            received.append(data)
+            data["schema_version"] = 99
+            return data
+
+        nfs_registry.apply_migration(tmp_path, up)
+        assert len(received) == 1
+        assert "models" in received[0]
+        assert nfs_registry.schema_version(tmp_path) == 99
+
+    def test_up_fn_runs_inside_lock(self, tmp_path: pathlib.Path) -> None:
+        """Mutations made by up_fn must be persisted after apply_migration returns."""
+        nfs_registry.register(
+            "pre",
+            config=_cfg(),
+            checkpoint_dir="/tmp/pre",
+            registry_dir=tmp_path,
+        )
+
+        def up(data: dict) -> dict:
+            # Simulate a migration that adds a new field to every entry.
+            for entry in data["models"].values():
+                entry["migrated"] = True
+            data["schema_version"] = 2
+            return data
+
+        nfs_registry.apply_migration(tmp_path, up)
+
+        # Read back the raw JSON and verify the mutation was saved.
+        import json
+
+        raw = json.loads((tmp_path / "registry.json").read_text())
+        assert raw["schema_version"] == 2
+        assert all(e.get("migrated") for e in raw["models"].values())
+
+
+# ---------------------------------------------------------------------------
+# TestAtomicWrite
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentAccess:
     def test_concurrent_writes_do_not_corrupt_registry(
         self, tmp_path: pathlib.Path
     ) -> None:

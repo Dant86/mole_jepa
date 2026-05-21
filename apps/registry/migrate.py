@@ -42,7 +42,7 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from mole_jepa.nfs_registry import _load, _registry_lock, _save  # noqa: E402
+import mole_jepa.nfs_registry as nfs_registry  # noqa: E402
 
 
 def _discover_migrations(
@@ -84,29 +84,35 @@ def run_pending(
     migrations_dir = pathlib.Path(__file__).parent / "migrations"
     all_migrations = _discover_migrations(migrations_dir)
 
-    with _registry_lock(registry_dir):
-        data = _load(registry_dir)
-        current = int(data.get("schema_version", 0))
+    # Read the current version outside the write lock (safe for display/filtering;
+    # apply_migration re-reads inside the lock so there is no TOCTOU on the write).
+    current = nfs_registry.schema_version(registry_dir)
+    pending = [(v, m) for v, m in all_migrations if v > current]
 
-        pending = [(v, m) for v, m in all_migrations if v > current]
-        if not pending:
-            print(f"Registry is up to date (schema_version={current}).")
-            return 0
+    if not pending:
+        print(f"Registry is up to date (schema_version={current}).")
+        return 0
 
-        print(f"Current schema_version: {current}. Pending migrations: {len(pending)}")
-        for version, mod in pending:
-            print(
-                f"  {'[dry-run] ' if dry_run else ''}Applying {mod.__name__!r}: "
-                f"{mod.DESCRIPTION!r}  →  schema_version={version}"
-            )
-            if not dry_run:
+    print(f"Current schema_version: {current}. Pending migrations: {len(pending)}")
+    for version, mod in pending:
+        print(
+            f"  {'[dry-run] ' if dry_run else ''}Applying {mod.__name__!r}: "
+            f"{mod.DESCRIPTION!r}  →  schema_version={version}"
+        )
+
+    if not dry_run:
+        # Capture pending in a closure; up_fn runs inside the exclusive lock.
+        _pending = pending
+
+        def _up(data: dict) -> dict:  # type: ignore[type-arg]
+            for _version, mod in _pending:
                 data = mod.up(data)
+            return data
 
-        if not dry_run:
-            _save(data, registry_dir)
-            print(f"Done. schema_version: {current} → {data['schema_version']}")
-        else:
-            print("Dry run complete — no changes written.")
+        nfs_registry.apply_migration(registry_dir, _up)
+        print(f"Done. schema_version: {current} → {pending[-1][0]}")
+    else:
+        print("Dry run complete — no changes written.")
 
     return len(pending)
 
