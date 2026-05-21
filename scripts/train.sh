@@ -98,10 +98,10 @@ trap on_term TERM
 setsid uv run python apps/train/train_main.py \
     --registry-path        "${REGISTRY_PATH}" \
     --num-epochs           100 \
-    --lr                   1e-4 \
+    --lr                   3e-4 \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
-    --batch-size           1024 \
+    --batch-size           4096 \
     --num-workers          12 \
     --prefetch-factor      4 \
     --max-seq-length       64 \
