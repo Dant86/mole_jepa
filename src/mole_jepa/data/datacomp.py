@@ -16,6 +16,8 @@ internally by WebDataset — no ``worker_init_fn`` is required.
 from __future__ import annotations
 
 import collections.abc
+import tarfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -140,6 +142,36 @@ def build_datacomp_loader(
         # workers inherit the pre-built pipeline from the parent process.
         multiprocessing_context="fork" if data_config.num_workers > 0 else None,
     )
+
+
+def count_samples(tar_paths: list[str], *, n_workers: int = 32) -> int:
+    """Count the total number of samples across a list of WebDataset tar shards.
+
+    Each img2dataset shard contains exactly one ``.jpg`` file per sample
+    (alongside ``.txt`` and ``.json`` sidecars), so the sample count equals
+    the number of ``.jpg`` tar members.  Tar headers are read in parallel
+    using threads (I/O-bound), so even 1 000+ shards finish in under a
+    minute on typical NFS.  Corrupt or unreadable shards are silently
+    skipped and contribute 0 to the total.
+
+    Args:
+        tar_paths: List of ``.tar`` shard paths (e.g. from
+            :func:`find_tar_shards`).
+        n_workers: Number of parallel threads for header reads.
+
+    Returns:
+        Total number of samples across all shards.
+    """
+
+    def _count_one(path: str) -> int:
+        try:
+            with tarfile.open(path, "r:*") as tf:
+                return sum(1 for m in tf.getmembers() if m.name.endswith(".jpg"))
+        except Exception:
+            return 0
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        return sum(pool.map(_count_one, tar_paths))
 
 
 def split_shards(

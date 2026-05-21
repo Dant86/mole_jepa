@@ -6,7 +6,12 @@ import unittest.mock
 import pytest
 import torch
 
-from mole_jepa.data.datacomp import build_datacomp_loader, find_tar_shards, split_shards
+from mole_jepa.data.datacomp import (
+    build_datacomp_loader,
+    count_samples,
+    find_tar_shards,
+    split_shards,
+)
 
 # ---------------------------------------------------------------------------
 # TestFindTarShards
@@ -106,6 +111,47 @@ class TestSplitShards:
         # training shards from the 50-shard run.
         train_100, _ = split_shards(paths + self._paths(50), val_fraction=0.1)
         assert train_50 == train_100[: len(train_50)]
+
+
+# ---------------------------------------------------------------------------
+# TestCountSamples
+# ---------------------------------------------------------------------------
+
+
+class TestCountSamples:
+    def _make_shard(self, path: pathlib.Path, n_samples: int) -> None:
+        """Write a minimal WebDataset-style tar with n_samples entries."""
+        import io
+        import tarfile as tf_mod
+
+        with tf_mod.open(path, "w:") as tar:
+            for i in range(n_samples):
+                for ext in ("jpg", "txt", "json"):
+                    data = f"sample_{i}".encode()
+                    info = tf_mod.TarInfo(name=f"{i:06d}.{ext}")
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+
+    def test_counts_jpg_members(self, tmp_path: pathlib.Path) -> None:
+        shard = tmp_path / "shard.tar"
+        self._make_shard(shard, n_samples=10)
+        assert count_samples([str(shard)]) == 10
+
+    def test_sums_across_multiple_shards(self, tmp_path: pathlib.Path) -> None:
+        for i, n in enumerate([5, 8, 3]):
+            self._make_shard(tmp_path / f"{i:05d}.tar", n_samples=n)
+        paths = [str(p) for p in sorted(tmp_path.glob("*.tar"))]
+        assert count_samples(paths) == 16
+
+    def test_empty_list_returns_zero(self) -> None:
+        assert count_samples([]) == 0
+
+    def test_corrupt_shard_skipped_silently(self, tmp_path: pathlib.Path) -> None:
+        good = tmp_path / "good.tar"
+        bad = tmp_path / "bad.tar"
+        self._make_shard(good, n_samples=4)
+        bad.write_bytes(b"this is not a tar file")
+        assert count_samples([str(good), str(bad)]) == 4
 
 
 # ---------------------------------------------------------------------------
