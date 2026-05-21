@@ -103,7 +103,7 @@ setsid uv run python apps/train/train_main.py \
     --grad-clip            1.0 \
     --batch-size           4096 \
     --num-workers          12 \
-    --prefetch-factor      4 \
+    --prefetch-factor      2 \
     --max-seq-length       64 \
     --hf-dataset-name      "${DATACOMP_LOCAL_DIR}/shards" \
     --val-shard-fraction   0.05 \
