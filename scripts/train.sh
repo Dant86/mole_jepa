@@ -12,8 +12,8 @@
 #SBATCH --partition=general
 #SBATCH --qos=general
 #SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=5
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
@@ -102,7 +102,8 @@ setsid uv run python apps/train/train_main.py \
     --weight-decay         1e-4 \
     --grad-clip            1.0 \
     --batch-size           1024 \
-    --num-workers          4 \
+    --num-workers          12 \
+    --prefetch-factor      4 \
     --max-seq-length       64 \
     --hf-dataset-name      "${DATACOMP_LOCAL_DIR}/shards" \
     --val-shard-fraction   0.05 \
