@@ -563,10 +563,6 @@ def main() -> None:
             f"{len(val_tar_paths):,} val  "
             f"(val_fraction={args.val_shard_fraction})"
         )
-        print("Counting samples (reads tar headers in parallel)…", flush=True)
-        n_train = data_module.count_samples(train_tar_paths)
-        n_val = data_module.count_samples(val_tar_paths) if val_tar_paths else 0
-        print(f"Samples: {n_train:,} train  {n_val:,} val  {n_train + n_val:,} total")
 
     loader = build_loader(
         train_dataset_name,
