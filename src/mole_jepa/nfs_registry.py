@@ -2,13 +2,16 @@
 
 The registry is a JSON file at ``{registry_dir}/registry.json`` that maps
 human-readable model names to their :class:`~mole_jepa.config.ModelConfig`
-and explicit checkpoint directory.
+and the checkpoint directory derived from the config hash.
 
 Key properties
 --------------
 - **Stable paths**: ``checkpoint_dir`` is written once at registration and
   never recomputed.  Adding new fields to :class:`~mole_jepa.config.ModelConfig`
   does *not* change existing entries.
+- **Single path convention**: every model's checkpoints live at
+  ``checkpoint_dir / config.serialize()``.  There is no concept of an
+  "explicit" path — the hash subdir is always derived automatically.
 - **NFS-safe writes**: all mutations acquire an exclusive ``flock`` on a
   ``.lock`` sidecar before reading, modifying, and atomically replacing the
   JSON file.
@@ -17,23 +20,27 @@ Key properties
   :data:`CURRENT_SCHEMA_VERSION`, write a migration in
   ``apps/registry/migrations/``, and run ``apps/registry/migrate.py`` on
   the cluster.
+- **Env defaults**: ``registry_dir`` and ``checkpoint_dir`` parameters
+  default to ``None``, which falls back to :func:`mole_jepa.env.registry_dir`
+  and :func:`mole_jepa.env.checkpoint_dir` respectively.
 
 Checkpoint directory convention
 --------------------------------
-By default, :func:`register` derives the checkpoint directory as::
+:func:`register` derives the checkpoint directory as::
 
-    checkpoint_base / config.serialize()
+    checkpoint_dir / config.serialize()
 
-This matches the convention used by the original hash-based system so that
-:func:`import_from_registry_py` can point new entries at existing directories
-without moving any data.  Pass ``checkpoint_dir`` explicitly to override.
+where ``checkpoint_dir`` is the root under which all model checkpoints live
+(e.g. ``/scratch/vpathak/checkpoints``).  The derived path is stored
+verbatim in the registry entry so it remains stable even if
+:class:`~mole_jepa.config.ModelConfig` gains new fields later.
 
 Usage::
 
     from mole_jepa import nfs_registry
 
-    # Read
-    entry = nfs_registry.get_entry("vit_base_bert_jepa_frozen", registry_dir)
+    # Read (registry_dir defaults to $REGISTRY_PATH)
+    entry = nfs_registry.get_entry("vit_base_bert_jepa_frozen")
     cfg   = entry.config
     ckpt  = entry.checkpoint_dir
 
@@ -41,9 +48,8 @@ Usage::
     nfs_registry.register(
         "my_experiment",
         config=ModelConfig(...),
-        checkpoint_base="/scratch/vpathak/checkpoints",
+        checkpoint_dir="/scratch/vpathak/checkpoints",
         description="Lower LR, frozen ViT",
-        registry_dir="/scratch/vpathak/registry",
     )
 """
 
@@ -80,6 +86,7 @@ class RegistryEntry:
         description: Free-text note (empty string if omitted).
         checkpoint_dir: Absolute path to the directory that holds
             ``model.pt``, ``config.json``, and ``train_state.pt``.
+            Always derived as ``<checkpoint_root> / config.serialize()``.
         config: The :class:`~mole_jepa.config.ModelConfig` registered for
             this model.
     """
@@ -157,6 +164,17 @@ def _entry_to_raw(entry: RegistryEntry) -> dict[str, Any]:
     }
 
 
+def _resolve_registry_dir(
+    registry_dir: str | pathlib.Path | None,
+) -> str | pathlib.Path:
+    """Return *registry_dir*, falling back to ``$REGISTRY_PATH`` if ``None``."""
+    if registry_dir is not None:
+        return registry_dir
+    from mole_jepa import env as env_module  # late import avoids circular deps
+
+    return env_module.registry_dir()
+
+
 # ---------------------------------------------------------------------------
 # Read API
 # ---------------------------------------------------------------------------
@@ -164,25 +182,29 @@ def _entry_to_raw(entry: RegistryEntry) -> dict[str, Any]:
 
 def get_entry(
     name: str,
-    registry_dir: str | pathlib.Path,
+    registry_dir: str | pathlib.Path | None = None,
 ) -> RegistryEntry:
     """Return the :class:`RegistryEntry` for *name*.
 
     Args:
         name: Registered model name.
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH`` (via :func:`mole_jepa.env.registry_dir`).
 
     Returns:
         The matching :class:`RegistryEntry`.
 
     Raises:
         KeyError: If *name* is not in the registry.
+        RuntimeError: If *registry_dir* is ``None`` and ``$REGISTRY_PATH``
+            is not set.
     """
-    data = _load(registry_dir)
+    rdir = _resolve_registry_dir(registry_dir)
+    data = _load(rdir)
     if name not in data["models"]:
         available = sorted(data["models"])
         raise KeyError(
-            f"Model {name!r} not found in registry at {registry_dir!r}. "
+            f"Model {name!r} not found in registry at {rdir!r}. "
             f"Registered models: {available}"
         )
     return _entry_from_raw(name, data["models"][name])
@@ -190,13 +212,14 @@ def get_entry(
 
 def get_config(
     name: str,
-    registry_dir: str | pathlib.Path,
+    registry_dir: str | pathlib.Path | None = None,
 ) -> config_module.ModelConfig:
     """Return the :class:`~mole_jepa.config.ModelConfig` for *name*.
 
     Args:
         name: Registered model name.
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
 
     Returns:
         The registered :class:`~mole_jepa.config.ModelConfig`.
@@ -206,52 +229,57 @@ def get_config(
 
 def get_checkpoint_dir(
     name: str,
-    registry_dir: str | pathlib.Path,
+    registry_dir: str | pathlib.Path | None = None,
 ) -> pathlib.Path:
     """Return the checkpoint directory path for *name*.
 
     Args:
         name: Registered model name.
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
 
     Returns:
-        Absolute path to the checkpoint directory.
+        Absolute path to the checkpoint directory (``<root> / config_hash``).
     """
     return get_entry(name, registry_dir).checkpoint_dir
 
 
 def list_entries(
-    registry_dir: str | pathlib.Path,
+    registry_dir: str | pathlib.Path | None = None,
 ) -> list[RegistryEntry]:
     """Return all entries in the registry, sorted by name.
 
     Args:
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
 
     Returns:
         List of :class:`RegistryEntry` objects sorted by ``name``.
     """
-    data = _load(registry_dir)
+    rdir = _resolve_registry_dir(registry_dir)
+    data = _load(rdir)
     return sorted(
         (_entry_from_raw(name, raw) for name, raw in data["models"].items()),
         key=lambda e: e.name,
     )
 
 
-def schema_version(registry_dir: str | pathlib.Path) -> int:
+def schema_version(registry_dir: str | pathlib.Path | None = None) -> int:
     """Return the current ``schema_version`` from the registry file.
 
     Args:
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
 
     Returns:
         Schema version integer (0 if the file does not exist yet).
     """
-    return int(_load(registry_dir).get("schema_version", 0))
+    rdir = _resolve_registry_dir(registry_dir)
+    return int(_load(rdir).get("schema_version", 0))
 
 
 # ---------------------------------------------------------------------------
-# Write API  (all mutations go through _Lock)
+# Write API  (all mutations go through the flock)
 # ---------------------------------------------------------------------------
 
 
@@ -259,62 +287,52 @@ def register(
     name: str,
     config: config_module.ModelConfig,
     *,
-    checkpoint_base: str | pathlib.Path | None = None,
     checkpoint_dir: str | pathlib.Path | None = None,
     description: str = "",
-    registry_dir: str | pathlib.Path,
+    registry_dir: str | pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> RegistryEntry:
     """Register a model config in the NFS registry.
 
-    Exactly one of *checkpoint_base* or *checkpoint_dir* must be provided.
+    The checkpoint directory is derived as::
 
-    When *checkpoint_base* is given, the checkpoint directory is derived as::
+        checkpoint_dir / config.serialize()
 
-        checkpoint_base / config.serialize()
-
-    This matches the convention used throughout the codebase so that the
-    path can be found even if the registry file is lost.  The derived path
-    is stored verbatim in the entry and never recomputed, so it remains
-    stable if :class:`~mole_jepa.config.ModelConfig` gains new fields.
-
-    When *checkpoint_dir* is given, it is used directly (useful for pointing
-    at pre-existing directories without renaming them).
+    This means every model's artifacts live at a unique, hash-named subdir
+    of the shared checkpoint root.  The derived path is stored verbatim in
+    the registry entry so it never changes even if new fields are added to
+    :class:`~mole_jepa.config.ModelConfig`.
 
     Args:
         name: Human-readable identifier (e.g. ``"vit_base_bert_jepa_frozen"``).
         config: The :class:`~mole_jepa.config.ModelConfig` to register.
-        checkpoint_base: Root directory; the hash subdir is appended
-            automatically.  Mutually exclusive with *checkpoint_dir*.
-        checkpoint_dir: Explicit checkpoint directory.  Mutually exclusive
-            with *checkpoint_base*.
+        checkpoint_dir: Root directory under which all model checkpoints live
+            (e.g. ``/scratch/vpathak/checkpoints``).  The hash-named subdir
+            is appended automatically.  Defaults to ``$CHECKPOINT_DIR`` (via
+            :func:`mole_jepa.env.checkpoint_dir`).
         description: Optional human note stored alongside the entry.
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
         overwrite: If ``True``, silently replace an entry with the same name.
 
     Returns:
         The newly created :class:`RegistryEntry`.
 
     Raises:
-        ValueError: If neither or both of *checkpoint_base* / *checkpoint_dir*
-            are provided, or if *name* already exists and ``overwrite=False``.
+        ValueError: If *name* already exists and ``overwrite=False``.
+        RuntimeError: If *checkpoint_dir* or *registry_dir* are ``None`` and
+            the corresponding environment variable is not set.
     """
-    if checkpoint_dir is None and checkpoint_base is None:
-        raise ValueError(
-            "Provide either checkpoint_base (hash subdir is appended) "
-            "or checkpoint_dir (explicit path)."
-        )
-    if checkpoint_dir is not None and checkpoint_base is not None:
-        raise ValueError("checkpoint_base and checkpoint_dir are mutually exclusive.")
+    if checkpoint_dir is None:
+        from mole_jepa import env as env_module
 
-    resolved_dir: pathlib.Path
-    if checkpoint_dir is not None:
-        resolved_dir = pathlib.Path(checkpoint_dir)
-    else:
-        resolved_dir = pathlib.Path(checkpoint_base) / config.serialize()  # type: ignore[arg-type]
+        checkpoint_dir = env_module.checkpoint_dir()
 
-    with _registry_lock(registry_dir):
-        data = _load(registry_dir)
+    rdir = _resolve_registry_dir(registry_dir)
+    resolved_dir = pathlib.Path(checkpoint_dir) / config.serialize()
+
+    with _registry_lock(rdir):
+        data = _load(rdir)
         if name in data["models"] and not overwrite:
             raise ValueError(
                 f"Model {name!r} is already registered. "
@@ -328,14 +346,14 @@ def register(
             config=config,
         )
         data["models"][name] = _entry_to_raw(entry)
-        _save(data, registry_dir)
+        _save(data, rdir)
 
     return entry
 
 
 def deregister(
     name: str,
-    registry_dir: str | pathlib.Path,
+    registry_dir: str | pathlib.Path | None = None,
 ) -> None:
     """Remove a model from the registry.
 
@@ -343,22 +361,24 @@ def deregister(
 
     Args:
         name: Registered model name to remove.
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
 
     Raises:
         KeyError: If *name* is not in the registry.
     """
-    with _registry_lock(registry_dir):
-        data = _load(registry_dir)
+    rdir = _resolve_registry_dir(registry_dir)
+    with _registry_lock(rdir):
+        data = _load(rdir)
         if name not in data["models"]:
-            raise KeyError(f"Model {name!r} not found in registry at {registry_dir!r}.")
+            raise KeyError(f"Model {name!r} not found in registry at {rdir!r}.")
         del data["models"][name]
-        _save(data, registry_dir)
+        _save(data, rdir)
 
 
 def apply_migration(
-    registry_dir: str | pathlib.Path,
-    up_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    registry_dir: str | pathlib.Path | None = None,
+    up_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> None:
     """Apply a schema-migration function to the raw registry data under a lock.
 
@@ -372,11 +392,15 @@ def apply_migration(
     for bumping ``data["schema_version"]`` as appropriate.
 
     Args:
-        registry_dir: Path to the registry directory on NFS.
+        registry_dir: Path to the registry directory on NFS.  Defaults to
+            ``$REGISTRY_PATH``.
         up_fn: Pure function ``dict → dict`` that applies one or more
             schema migrations.  Called exactly once, inside the lock.
     """
-    with _registry_lock(registry_dir):
-        data = _load(registry_dir)
+    if up_fn is None:
+        raise ValueError("up_fn is required.")
+    rdir = _resolve_registry_dir(registry_dir)
+    with _registry_lock(rdir):
+        data = _load(rdir)
         data = up_fn(data)
-        _save(data, registry_dir)
+        _save(data, rdir)

@@ -3,10 +3,10 @@ r"""One-time import: migrate CONFIGS from registry.py into the NFS registry.
 For each named config in ``src/mole_jepa/registry.py``:
 
 1. Compute the SHA-256 hash (``config.serialize()``) — this is the name of
-   the existing checkpoint subdirectory under ``--checkpoint-base``.
+   the existing checkpoint subdirectory under ``--checkpoint-dir``.
 2. Check whether that directory exists on disk.
-3. Create an NFS registry entry with ``checkpoint_dir`` pointing to the
-   existing directory (no data is moved or renamed).
+3. Create an NFS registry entry pointing at the existing directory (no data
+   is moved or renamed).
 
 After a successful import and verification, delete ``src/mole_jepa/registry.py``
 and remove the ``registry`` import from ``src/mole_jepa/__init__.py``.
@@ -15,14 +15,14 @@ Usage::
 
     # Dry run — print what would be imported, write nothing:
     uv run python apps/registry/import_from_registry_py.py \\
-        --checkpoint-base $CHECKPOINT_DIR \\
-        --registry-path   $REGISTRY_PATH \\
+        --checkpoint-dir $CHECKPOINT_DIR \\
+        --registry-path  $REGISTRY_PATH \\
         --dry-run
 
     # Live import:
     uv run python apps/registry/import_from_registry_py.py \\
-        --checkpoint-base $CHECKPOINT_DIR \\
-        --registry-path   $REGISTRY_PATH
+        --checkpoint-dir $CHECKPOINT_DIR \\
+        --registry-path  $REGISTRY_PATH
 
 Entries that already exist in the NFS registry are skipped unless
 --overwrite is passed.  Configs whose checkpoint directory does not exist
@@ -50,7 +50,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--checkpoint-base",
+        "--checkpoint-dir",
         default=os.environ.get("CHECKPOINT_DIR"),
         metavar="DIR",
         help=(
@@ -86,17 +86,17 @@ def main() -> None:
             "No registry path set. "
             "Pass --registry-path or set $REGISTRY_PATH in your environment."
         )
-    if not args.checkpoint_base:
+    if not args.checkpoint_dir:
         raise SystemExit(
-            "No checkpoint base set. "
-            "Pass --checkpoint-base or set $CHECKPOINT_DIR in your environment."
+            "No checkpoint directory set. "
+            "Pass --checkpoint-dir or set $CHECKPOINT_DIR in your environment."
         )
 
-    checkpoint_base = pathlib.Path(args.checkpoint_base)
+    checkpoint_base = pathlib.Path(args.checkpoint_dir)
     configs = old_registry.CONFIGS
 
     print(f"Found {len(configs)} configs in registry.py")
-    print(f"Checkpoint base : {checkpoint_base}")
+    print(f"Checkpoint dir  : {checkpoint_base}")
     print(f"Registry path   : {args.registry_path}")
     print(f"Dry run         : {args.dry_run}")
     print()
@@ -128,7 +128,7 @@ def main() -> None:
             nfs_registry.register(
                 name,
                 config,
-                checkpoint_dir=checkpoint_dir,
+                checkpoint_dir=checkpoint_base,  # base dir; hash subdir appended
                 description=f"Imported from registry.py (hash: {config_hash[:8]})",
                 registry_dir=args.registry_path,
                 overwrite=args.overwrite,

@@ -137,6 +137,38 @@ class TestBuildImageTransform:
         result = transform(dummy_image)
         assert isinstance(result, torch.Tensor)
 
+    def test_val_transform_is_deterministic(
+        self,
+        mock_image_processor: unittest.mock.MagicMock,
+        dummy_image: PIL.Image.Image,
+    ) -> None:
+        """train=False uses CenterCrop — two calls on the same image must be equal."""
+        with unittest.mock.patch(
+            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = mock_image_processor
+            transform = transforms.build_image_transform(_MODEL_NAME, train=False)
+
+        result1 = transform(dummy_image)
+        result2 = transform(dummy_image)
+        assert result1.shape == (_C, _H, _W)
+        assert torch.equal(result1, result2)
+
+    def test_train_transform_output_shape(
+        self,
+        mock_image_processor: unittest.mock.MagicMock,
+        dummy_image: PIL.Image.Image,
+    ) -> None:
+        """train=True (default) still produces the expected spatial dimensions."""
+        with unittest.mock.patch(
+            "mole_jepa.data.transforms.transformers.AutoImageProcessor"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = mock_image_processor
+            transform = transforms.build_image_transform(_MODEL_NAME, train=True)
+
+        result = transform(dummy_image)
+        assert result.shape == (_C, _H, _W)
+
 
 class TestPreprocess:
     def test_output_shapes(

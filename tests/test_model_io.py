@@ -9,7 +9,7 @@ import torch
 
 from mole_jepa import config as config_module
 from mole_jepa import model_io as mio
-from mole_jepa import models
+from mole_jepa import models, nfs_registry
 
 _HIDDEN = 32
 _EMBED = 16
@@ -45,6 +45,24 @@ def model_and_optimizer(
     return model, optimizer
 
 
+@pytest.fixture
+def registry(
+    tmp_path: pathlib.Path,
+    small_config: config_module.ModelConfig,
+) -> tuple[pathlib.Path, str]:
+    """Register a model under 'test_model' and return (registry_dir, name)."""
+    reg_dir = tmp_path / "registry"
+    ckpt_base = tmp_path / "checkpoints"
+    name = "test_model"
+    nfs_registry.register(
+        name,
+        config=small_config,
+        checkpoint_dir=ckpt_base,
+        registry_dir=reg_dir,
+    )
+    return reg_dir, name
+
+
 # ── TestModelDir ──────────────────────────────────────────────────────────────
 
 
@@ -73,102 +91,101 @@ class TestSaveLoadModel:
     def test_save_writes_model_and_config(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        loc = mio.model_dir(tmp_path, small_config)
-        assert (loc / "model.pt").exists()
-        assert (loc / "config.json").exists()
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        assert (ckpt / "model.pt").exists()
+        assert (ckpt / "config.json").exists()
 
     def test_save_is_atomic(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        loc = mio.model_dir(tmp_path, small_config)
-        assert not (loc / "model.pt.tmp").exists()
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        assert not (ckpt / "model.pt.tmp").exists()
 
     def test_save_does_not_overwrite_existing_config(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         """Second save_model call must not clobber an existing config.json."""
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
         # Spy on write_text — it must not be called on the second save.
         with unittest.mock.patch("pathlib.Path.write_text") as mock_write:
-            mio.save_model(model, small_config, tmp_path)
+            mio.save_model(model, name, registry_dir=reg_dir)
         mock_write.assert_not_called()
 
     def test_model_pt_contains_only_state_dict(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        loc = mio.model_dir(tmp_path, small_config)
-        contents = torch.load(loc / "model.pt", weights_only=True)
-        # State dict is a flat mapping of str → Tensor, not a nested dict
-        # with "model_state_dict", "epoch", etc.
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        contents = torch.load(ckpt / "model.pt", weights_only=True)
         assert isinstance(contents, dict)
         assert all(isinstance(v, torch.Tensor) for v in contents.values())
 
     def test_load_model_round_trip(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
         mock_pretrained: unittest.mock.MagicMock,
     ) -> None:
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        loaded = mio.load_model(small_config, tmp_path)
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        loaded = mio.load_model(name, registry_dir=reg_dir)
         for p_orig, p_loaded in zip(model.parameters(), loaded.parameters()):
             assert torch.equal(p_orig, p_loaded)
 
     def test_load_model_weights_into_existing(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
         mock_pretrained: unittest.mock.MagicMock,
     ) -> None:
         from mole_jepa import factory
 
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        target, _ = factory.build(small_config)
-        mio.load_model_weights(target, small_config, tmp_path)
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        cfg = nfs_registry.get_config(name, reg_dir)
+        target, _ = factory.build(cfg)
+        mio.load_model_weights(target, name, registry_dir=reg_dir)
         for p_orig, p_loaded in zip(model.parameters(), target.parameters()):
             assert torch.equal(p_orig, p_loaded)
 
     def test_load_raises_if_missing(
         self,
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
         mock_pretrained: unittest.mock.MagicMock,
     ) -> None:
+        reg_dir, name = registry
         with pytest.raises(FileNotFoundError):
-            mio.load_model(small_config, tmp_path)
+            mio.load_model(name, registry_dir=reg_dir)
 
     def test_load_model_weights_raises_if_missing(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         model, _ = model_and_optimizer
+        reg_dir, name = registry
         with pytest.raises(FileNotFoundError):
-            mio.load_model_weights(model, small_config, tmp_path)
+            mio.load_model_weights(model, name, registry_dir=reg_dir)
 
 
 # ── TestTrainState ────────────────────────────────────────────────────────────
@@ -177,30 +194,30 @@ class TestSaveLoadModel:
 class TestTrainState:
     def test_has_train_state_false_initially(
         self,
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
-        assert not mio.has_train_state(small_config, tmp_path)
+        reg_dir, name = registry
+        assert not mio.has_train_state(name, registry_dir=reg_dir)
 
     def test_has_train_state_true_after_save(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         _, optimizer = model_and_optimizer
-        mio.save_train_state(optimizer, epoch=3, config=small_config, root=tmp_path)
-        assert mio.has_train_state(small_config, tmp_path)
+        reg_dir, name = registry
+        mio.save_train_state(optimizer, epoch=3, name=name, registry_dir=reg_dir)
+        assert mio.has_train_state(name, registry_dir=reg_dir)
 
     def test_round_trip_preserves_epoch(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         _, optimizer = model_and_optimizer
-        mio.save_train_state(optimizer, epoch=7, config=small_config, root=tmp_path)
-        result = mio.load_train_state(small_config, tmp_path)
+        reg_dir, name = registry
+        mio.save_train_state(optimizer, epoch=7, name=name, registry_dir=reg_dir)
+        result = mio.load_train_state(name, registry_dir=reg_dir)
         assert result is not None
         _, epoch = result
         assert epoch == 7
@@ -208,53 +225,53 @@ class TestTrainState:
     def test_round_trip_preserves_optimizer_state(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         _, optimizer = model_and_optimizer
+        reg_dir, name = registry
         original_state = optimizer.state_dict()
-        mio.save_train_state(optimizer, epoch=0, config=small_config, root=tmp_path)
-        result = mio.load_train_state(small_config, tmp_path)
+        mio.save_train_state(optimizer, epoch=0, name=name, registry_dir=reg_dir)
+        result = mio.load_train_state(name, registry_dir=reg_dir)
         assert result is not None
         opt_state, _ = result
         assert opt_state["param_groups"] == original_state["param_groups"]
 
     def test_load_returns_none_when_missing(
         self,
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
-        assert mio.load_train_state(small_config, tmp_path) is None
+        reg_dir, name = registry
+        assert mio.load_train_state(name, registry_dir=reg_dir) is None
 
     def test_save_is_atomic(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         _, optimizer = model_and_optimizer
-        mio.save_train_state(optimizer, epoch=0, config=small_config, root=tmp_path)
-        loc = mio.model_dir(tmp_path, small_config)
-        assert not (loc / "train_state.pt.tmp").exists()
+        reg_dir, name = registry
+        mio.save_train_state(optimizer, epoch=0, name=name, registry_dir=reg_dir)
+        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        assert not (ckpt / "train_state.pt.tmp").exists()
 
     def test_cleanup_removes_train_state(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         _, optimizer = model_and_optimizer
-        mio.save_train_state(optimizer, epoch=0, config=small_config, root=tmp_path)
-        assert mio.has_train_state(small_config, tmp_path)
-        mio.cleanup_train_state(small_config, tmp_path)
-        assert not mio.has_train_state(small_config, tmp_path)
+        reg_dir, name = registry
+        mio.save_train_state(optimizer, epoch=0, name=name, registry_dir=reg_dir)
+        assert mio.has_train_state(name, registry_dir=reg_dir)
+        mio.cleanup_train_state(name, registry_dir=reg_dir)
+        assert not mio.has_train_state(name, registry_dir=reg_dir)
 
     def test_cleanup_is_safe_when_missing(
         self,
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
-        mio.cleanup_train_state(small_config, tmp_path)  # should not raise
+        reg_dir, name = registry
+        mio.cleanup_train_state(name, registry_dir=reg_dir)  # should not raise
 
 
 # ── TestListModels ────────────────────────────────────────────────────────────
@@ -270,12 +287,14 @@ class TestListModels:
     def test_finds_saved_model(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registry: tuple[pathlib.Path, str],
         small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
     ) -> None:
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        results = mio.list_models(tmp_path)
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        ckpt_root = nfs_registry.get_checkpoint_dir(name, reg_dir).parent
+        results = mio.list_models(ckpt_root)
         assert len(results) == 1
         assert results[0].config == small_config
         assert results[0].config_hash == small_config.serialize()
@@ -283,14 +302,15 @@ class TestListModels:
     def test_skips_plain_files_in_root(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         """Non-directory entries in the root (e.g. stray files) are ignored."""
         model, _ = model_and_optimizer
-        (tmp_path / "stray.txt").write_text("garbage")
-        mio.save_model(model, small_config, tmp_path)
-        results = mio.list_models(tmp_path)
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        ckpt_root = nfs_registry.get_checkpoint_dir(name, reg_dir).parent
+        (ckpt_root / "stray.txt").write_text("garbage")
+        results = mio.list_models(ckpt_root)
         assert len(results) == 1
 
     def test_skips_dir_missing_model_pt(
@@ -310,13 +330,15 @@ class TestListModels:
     def test_skips_dir_missing_config_json(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
+        registry: tuple[pathlib.Path, str],
     ) -> None:
         model, _ = model_and_optimizer
-        mio.save_model(model, small_config, tmp_path)
-        (mio.model_dir(tmp_path, small_config) / "config.json").unlink()
-        assert mio.list_models(tmp_path) == []
+        reg_dir, name = registry
+        mio.save_model(model, name, registry_dir=reg_dir)
+        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        (ckpt / "config.json").unlink()
+        ckpt_root = ckpt.parent
+        assert mio.list_models(ckpt_root) == []
 
     def test_filter_by_field(
         self,
@@ -325,12 +347,18 @@ class TestListModels:
     ) -> None:
         from mole_jepa import factory
 
+        ckpt_root = tmp_path / "ckpts"
+        reg_dir = tmp_path / "registry"
         for embed_dim in [16, 32, 64]:
             cfg = config_module.ModelConfig(embed_dim=embed_dim, predictor_n_layers=2)
             model, _ = factory.build(cfg)
-            mio.save_model(model, cfg, tmp_path)
+            name = f"model_{embed_dim}"
+            nfs_registry.register(
+                name, config=cfg, checkpoint_dir=ckpt_root, registry_dir=reg_dir
+            )
+            mio.save_model(model, name, registry_dir=reg_dir)
 
-        results = mio.list_models(tmp_path, embed_dim=32)
+        results = mio.list_models(ckpt_root, embed_dim=32)
         assert len(results) == 1
         assert results[0].config.embed_dim == 32
 
@@ -341,6 +369,8 @@ class TestListModels:
     ) -> None:
         from mole_jepa import factory
 
+        ckpt_root = tmp_path / "ckpts"
+        reg_dir = tmp_path / "registry"
         cfgs = [
             config_module.ModelConfig(
                 embed_dim=16, contrastive=False, predictor_n_layers=2
@@ -352,11 +382,15 @@ class TestListModels:
                 embed_dim=32, contrastive=True, predictor_n_layers=2
             ),
         ]
-        for cfg in cfgs:
+        for i, cfg in enumerate(cfgs):
             model, _ = factory.build(cfg)
-            mio.save_model(model, cfg, tmp_path)
+            name = f"model_{i}"
+            nfs_registry.register(
+                name, config=cfg, checkpoint_dir=ckpt_root, registry_dir=reg_dir
+            )
+            mio.save_model(model, name, registry_dir=reg_dir)
 
-        results = mio.list_models(tmp_path, embed_dim=16, contrastive=True)
+        results = mio.list_models(ckpt_root, embed_dim=16, contrastive=True)
         assert len(results) == 1
         assert results[0].config.embed_dim == 16
         assert results[0].config.contrastive is True
@@ -374,164 +408,18 @@ class TestListModels:
 
         from mole_jepa import factory
 
-        saved_configs = []
+        ckpt_root = tmp_path / "ckpts"
+        reg_dir = tmp_path / "registry"
         for embed_dim in [16, 32, 64]:
             cfg = config_module.ModelConfig(embed_dim=embed_dim, predictor_n_layers=2)
             model, _ = factory.build(cfg)
-            mio.save_model(model, cfg, tmp_path)
-            saved_configs.append(cfg)
+            name = f"model_{embed_dim}"
+            nfs_registry.register(
+                name, config=cfg, checkpoint_dir=ckpt_root, registry_dir=reg_dir
+            )
+            mio.save_model(model, name, registry_dir=reg_dir)
             time.sleep(0.01)  # ensure distinct mtimes
 
-        results = mio.list_models(tmp_path)
+        results = mio.list_models(ckpt_root)
         assert results[0].config.embed_dim == 64  # last saved → most recent
         assert results[-1].config.embed_dim == 16  # first saved → oldest
-
-
-# ── TestExplicitPath (_at variants) ──────────────────────────────────────────
-
-
-class TestExplicitPath:
-    """Tests for the explicit checkpoint_dir variants of save/load functions."""
-
-    def test_save_model_at_writes_model_pt(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        mio.save_model_at(model, tmp_path)
-        assert (tmp_path / "model.pt").exists()
-
-    def test_save_model_at_writes_config_json_when_provided(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        mio.save_model_at(model, tmp_path, config=small_config)
-        assert (tmp_path / "config.json").exists()
-
-    def test_save_model_at_no_config_json_without_config(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        mio.save_model_at(model, tmp_path)
-        assert not (tmp_path / "config.json").exists()
-
-    def test_save_model_at_is_atomic(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        mio.save_model_at(model, tmp_path)
-        assert not (tmp_path / "model.pt.tmp").exists()
-
-    def test_save_model_at_does_not_overwrite_existing_config_json(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        small_config: config_module.ModelConfig,
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        mio.save_model_at(model, tmp_path, config=small_config)
-        with unittest.mock.patch("pathlib.Path.write_text") as mock_write:
-            mio.save_model_at(model, tmp_path, config=small_config)
-        mock_write.assert_not_called()
-
-    def test_load_model_weights_at_round_trip(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        mio.save_model_at(model, tmp_path)
-        # Build a fresh model with the same architecture via mock.
-        target = models.MoLeJEPA(
-            image_encoder=model.image_encoder,
-            text_encoder=model.text_encoder,
-            predictor=model.predictor,
-        )
-        mio.load_model_weights_at(target, tmp_path)
-        for p_orig, p_loaded in zip(model.parameters(), target.parameters()):
-            assert torch.equal(p_orig, p_loaded)
-
-    def test_load_model_weights_at_raises_if_missing(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        model, _ = model_and_optimizer
-        with pytest.raises(FileNotFoundError):
-            mio.load_model_weights_at(model, tmp_path)
-
-    def test_save_train_state_at_writes_file(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        _, optimizer = model_and_optimizer
-        mio.save_train_state_at(optimizer, epoch=5, checkpoint_dir=tmp_path)
-        assert (tmp_path / "train_state.pt").exists()
-
-    def test_save_train_state_at_is_atomic(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        _, optimizer = model_and_optimizer
-        mio.save_train_state_at(optimizer, epoch=0, checkpoint_dir=tmp_path)
-        assert not (tmp_path / "train_state.pt.tmp").exists()
-
-    def test_load_train_state_at_round_trip(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        _, optimizer = model_and_optimizer
-        mio.save_train_state_at(optimizer, epoch=9, checkpoint_dir=tmp_path)
-        result = mio.load_train_state_at(tmp_path)
-        assert result is not None
-        _, epoch = result
-        assert epoch == 9
-
-    def test_load_train_state_at_returns_none_when_absent(
-        self,
-        tmp_path: pathlib.Path,
-    ) -> None:
-        assert mio.load_train_state_at(tmp_path) is None
-
-    def test_has_train_state_at_false_initially(
-        self,
-        tmp_path: pathlib.Path,
-    ) -> None:
-        assert not mio.has_train_state_at(tmp_path)
-
-    def test_has_train_state_at_true_after_save(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        _, optimizer = model_and_optimizer
-        mio.save_train_state_at(optimizer, epoch=0, checkpoint_dir=tmp_path)
-        assert mio.has_train_state_at(tmp_path)
-
-    def test_cleanup_train_state_at_removes_file(
-        self,
-        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
-        tmp_path: pathlib.Path,
-    ) -> None:
-        _, optimizer = model_and_optimizer
-        mio.save_train_state_at(optimizer, epoch=0, checkpoint_dir=tmp_path)
-        assert mio.has_train_state_at(tmp_path)
-        mio.cleanup_train_state_at(tmp_path)
-        assert not mio.has_train_state_at(tmp_path)
-
-    def test_cleanup_train_state_at_safe_when_absent(
-        self,
-        tmp_path: pathlib.Path,
-    ) -> None:
-        mio.cleanup_train_state_at(tmp_path)  # must not raise

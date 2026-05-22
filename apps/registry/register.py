@@ -8,30 +8,29 @@ Usage examples::
     # List all registered models
     uv run python apps/registry/register.py --list
 
-    # Register a new model by cloning config from an existing entry
-    uv run python apps/registry/register.py \\
-        --name vit_base_bert_jepa_frozen_v2 \\
-        --from-entry vit_base_bert_jepa_frozen \\
-        --description "Lower LR experiment" \\
-        --checkpoint-base $CHECKPOINT_DIR
+    # Register a model by cloning config from an existing entry
+    uv run python apps/registry/register.py \
+        --name vit_base_bert_jepa_frozen_v2 \
+        --from-entry vit_base_bert_jepa_frozen \
+        --description "Lower LR experiment"
 
     # Register a model by supplying the full config as JSON
-    uv run python apps/registry/register.py \\
-        --name my_experiment \\
-        --config-json '{"embed_dim": 128, "contrastive": false, ...}' \\
-        --checkpoint-base $CHECKPOINT_DIR \\
+    uv run python apps/registry/register.py \
+        --name my_experiment \
+        --config-json '{"embed_dim": 128, "contrastive": false, ...}'  \
         --description "Tiny model ablation"
 
-    # Point at an existing checkpoint directory (e.g. after import)
-    uv run python apps/registry/register.py \\
-        --name vit_base_bert_jepa_frozen \\
-        --from-entry vit_base_bert_jepa_frozen \\
-        --checkpoint-dir /scratch/vpathak/checkpoints/abc123def456
+    # Override the checkpoint root (defaults to $CHECKPOINT_DIR)
+    uv run python apps/registry/register.py \
+        --name my_experiment \
+        --config-json '{"embed_dim": 128}' \
+        --checkpoint-dir /scratch/alt_checkpoints
 
     # Remove an entry (does NOT delete checkpoint files)
     uv run python apps/registry/register.py --deregister vit_base_bert_jepa_frozen
 
-All commands respect --registry-path (or $REGISTRY_PATH).
+All commands default --registry-path to $REGISTRY_PATH and --checkpoint-dir
+to $CHECKPOINT_DIR from the environment (or a .env file in the project root).
 """
 
 import argparse
@@ -90,21 +89,12 @@ def _cmd_register(args: argparse.Namespace) -> None:
         except TypeError as exc:
             raise SystemExit(f"Invalid ModelConfig fields: {exc}") from exc
 
-    # ── resolve checkpoint path ───────────────────────────────────────────────
-    if args.checkpoint_dir and args.checkpoint_base:
-        raise SystemExit(
-            "--checkpoint-dir and --checkpoint-base are mutually exclusive."
-        )
-    if not args.checkpoint_dir and not args.checkpoint_base:
-        raise SystemExit("Provide either --checkpoint-base or --checkpoint-dir.")
-
     entry = nfs_registry.register(
         args.name,
         model_config,
-        checkpoint_base=args.checkpoint_base,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=args.checkpoint_dir,  # None → falls back to $CHECKPOINT_DIR
         description=args.description or "",
-        registry_dir=args.registry_path,
+        registry_dir=args.registry_path,  # None → falls back to $REGISTRY_PATH
         overwrite=args.overwrite,
     )
     print(f"Registered {entry.name!r}")
@@ -112,7 +102,7 @@ def _cmd_register(args: argparse.Namespace) -> None:
     print(f"  config hash    : {entry.config.serialize()}")
 
 
-def _cmd_deregister(name: str, registry_dir: str) -> None:
+def _cmd_deregister(name: str, registry_dir: str | None) -> None:
     """Remove an entry from the registry."""
     nfs_registry.deregister(name, registry_dir)
     print(f"Removed {name!r} from registry (checkpoint files untouched).")
@@ -162,18 +152,15 @@ def main() -> None:
         help="Full ModelConfig as a JSON object string.",
     )
     parser.add_argument(
-        "--checkpoint-base",
-        default=os.environ.get("CHECKPOINT_DIR"),
+        "--checkpoint-dir",
+        default=None,
         metavar="DIR",
         help=(
-            "Root checkpoint directory; hash subdir is appended automatically. "
+            "Root directory under which all model checkpoints live "
+            "(e.g. /scratch/vpathak/checkpoints).  The config hash is "
+            "appended automatically — you never need to specify the full path. "
             "Defaults to $CHECKPOINT_DIR."
         ),
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        metavar="DIR",
-        help="Explicit checkpoint directory (overrides --checkpoint-base).",
     )
     parser.add_argument(
         "--description",
@@ -187,12 +174,6 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-
-    if not args.registry_path:
-        raise SystemExit(
-            "No registry path set. "
-            "Pass --registry-path or set $REGISTRY_PATH in your environment."
-        )
 
     if args.list:
         _cmd_list(args.registry_path)

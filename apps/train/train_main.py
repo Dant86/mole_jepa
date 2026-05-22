@@ -60,14 +60,6 @@ def parse_args() -> argparse.Namespace:
 
     # ── training ──────────────────────────────────────────────────────────────
     parser.add_argument(
-        "--checkpoint-dir",
-        default=None,
-        help=(
-            "Override the checkpoint directory from the registry. "
-            "If omitted, the path stored in the registry entry is used."
-        ),
-    )
-    parser.add_argument(
         "--num-epochs",
         type=int,
         required=True,
@@ -218,36 +210,23 @@ def resolve_entry(
 ) -> tuple[config_module.ModelConfig, pathlib.Path]:
     """Resolve the model config and checkpoint directory from the NFS registry.
 
-    The checkpoint directory comes from the registry entry unless
-    ``--checkpoint-dir`` is explicitly provided on the command line.
-
     Args:
-        args: Parsed CLI arguments (must include ``args.config``,
-            ``args.registry_path``, and optionally ``args.checkpoint_dir``).
+        args: Parsed CLI arguments (must include ``args.config`` and
+            optionally ``args.registry_path``).
 
     Returns:
         ``(model_config, checkpoint_dir)`` tuple.
 
     Raises:
-        SystemExit: If ``args.registry_path`` is unset, or if ``args.config``
-            is not found in the registry.
+        SystemExit: If ``args.config`` is not found in the registry, or if no
+            registry path is set in the CLI args or the environment.
     """
-    if not args.registry_path:
-        raise SystemExit(
-            "No registry path set. "
-            "Pass --registry-path or set $REGISTRY_PATH in your environment."
-        )
     try:
-        entry = nfs_registry.get_entry(args.config, args.registry_path)
-    except KeyError as exc:
+        entry = nfs_registry.get_entry(args.config, args.registry_path or None)
+    except (KeyError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
 
-    checkpoint_dir = (
-        pathlib.Path(args.checkpoint_dir)
-        if args.checkpoint_dir
-        else entry.checkpoint_dir
-    )
-    return entry.config, checkpoint_dir
+    return entry.config, entry.checkpoint_dir
 
 
 def construct_data_config(
@@ -660,12 +639,21 @@ def main() -> None:
     # OptimizedModule that prefixes all state_dict keys with "_orig_mod.".
     # Checkpoints saved from an uncompiled model use bare keys, so loading
     # into a compiled model causes a key-mismatch RuntimeError.
-    resuming = model_io.has_train_state_at(checkpoint_dir)
+    resuming = model_io.has_train_state(
+        args.config, registry_dir=args.registry_path or None
+    )
 
     start_epoch = 0
     if resuming:
-        model_io.load_model_weights_at(model, checkpoint_dir, map_location=device)
-        train_state = model_io.load_train_state_at(checkpoint_dir)
+        model_io.load_model_weights(
+            model,
+            args.config,
+            registry_dir=args.registry_path or None,
+            map_location=device,
+        )
+        train_state = model_io.load_train_state(
+            args.config, registry_dir=args.registry_path or None
+        )
         assert train_state is not None
         opt_state_dict, last_epoch = train_state
         optimizer.load_state_dict(opt_state_dict)
@@ -696,8 +684,13 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        model_io.save_model_at(model, checkpoint_dir, config=model_config)
-        model_io.save_train_state_at(optimizer, current_epoch, checkpoint_dir)
+        model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
+        model_io.save_train_state(
+            optimizer,
+            current_epoch,
+            args.config,
+            registry_dir=args.registry_path or None,
+        )
         # Explicitly tear down DataLoader workers before exiting.  If we call
         # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
         # worker processes are orphaned and Python's multiprocessing resource
@@ -748,14 +741,16 @@ def main() -> None:
         log_stats(
             checkpoint_dir, epoch, train_stats, train_batches, val_stats, val_batches
         )
-        model_io.save_model_at(model, checkpoint_dir, config=model_config)
-        model_io.save_train_state_at(optimizer, epoch, checkpoint_dir)
+        model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
+        model_io.save_train_state(
+            optimizer, epoch, args.config, registry_dir=args.registry_path or None
+        )
 
     # Training completed successfully.
     # Save the final model weights, then remove the ephemeral train state —
     # it is only needed for resumption and is no longer useful.
-    model_io.save_model_at(model, checkpoint_dir, config=model_config)
-    model_io.cleanup_train_state_at(checkpoint_dir)
+    model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
+    model_io.cleanup_train_state(args.config, registry_dir=args.registry_path or None)
 
 
 if __name__ == "__main__":
