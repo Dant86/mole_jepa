@@ -655,18 +655,11 @@ def main() -> None:
         fused=use_fused,
     )
 
-    if args.compile:
-        # torch.compile traces the model into optimised Triton/CUDA kernels.
-        # The first forward pass is slow (kernel compilation); subsequent
-        # passes run ~20–40% faster.  Use --compile only after confirming the
-        # training loop is stable.
-        print("Compiling model with torch.compile …")
-        model = cast(models.MoLeJEPA, torch.compile(model))
-
     # ── resume detection ──────────────────────────────────────────────────────
-    # Auto-resume if a train state exists in the registry-resolved directory.
-    # The path comes from the registry entry, so it is stable across config
-    # field additions (no hash recomputation at resume time).
+    # Load checkpoint BEFORE torch.compile.  compile() wraps the model in an
+    # OptimizedModule that prefixes all state_dict keys with "_orig_mod.".
+    # Checkpoints saved from an uncompiled model use bare keys, so loading
+    # into a compiled model causes a key-mismatch RuntimeError.
     resuming = model_io.has_train_state_at(checkpoint_dir)
 
     start_epoch = 0
@@ -686,6 +679,14 @@ def main() -> None:
         print(f"Resuming from epoch {start_epoch}")
     else:
         print("Starting fresh run")
+
+    if args.compile:
+        # torch.compile traces the model into optimised Triton/CUDA kernels.
+        # The first forward pass is slow (kernel compilation); subsequent
+        # passes run ~20–40% faster.  Must happen AFTER checkpoint loading —
+        # see comment above.
+        print("Compiling model with torch.compile …")
+        model = cast(models.MoLeJEPA, torch.compile(model))
 
     # ── preemption handler ────────────────────────────────────────────────────
     # On the DSI cluster, preemption sends SIGUSR1 with a 5-minute grace period
