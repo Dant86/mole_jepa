@@ -75,6 +75,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=None,
+        help=(
+            "Cap the training set to this many samples per epoch.  Applied "
+            "after the shuffle buffer so each epoch sees a different random "
+            "subset.  Validation is unaffected.  Example: --max-train-samples 2000000."
+        ),
+    )
+    parser.add_argument(
         "--val-interval",
         type=int,
         default=1,
@@ -286,6 +296,7 @@ def build_loader(
     *,
     tar_paths: list[str] | None = None,
     shuffle: bool = True,
+    max_samples: int | None = None,
 ) -> torch.utils.data.DataLoader:  # type: ignore[type-arg]
     """Stream a dataset and wrap it in a :class:`DataLoader`.
 
@@ -310,6 +321,8 @@ def build_loader(
             when using the HF backend.
         shuffle: Whether to shuffle shards and samples.  Pass ``False`` for
             the validation loader.
+        max_samples: Optional maximum number of training samples to observe.
+            If ``None``, uses the full training set. Defaults to ``None``.
 
     Returns:
         A :class:`DataLoader` yielding ``(pixel_values, input_ids,
@@ -319,7 +332,7 @@ def build_loader(
         paths = tar_paths or data_module.find_tar_shards(dataset_name)
         print(f"  WebDataset: {len(paths):,} shards from {dataset_name}")
         return data_module.build_datacomp_loader(
-            paths, data_config, device, shuffle=shuffle
+            paths, data_config, device, shuffle=shuffle, max_samples=max_samples
         )
 
     hf_ds = hf_datasets.load_dataset(dataset_name, split=split, streaming=True)
@@ -599,6 +612,7 @@ def main() -> None:
         device,
         tar_paths=train_tar_paths,
         shuffle=True,
+        max_samples=args.max_train_samples,
     )
     val_loader = build_loader(
         val_dataset_name,

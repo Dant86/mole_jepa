@@ -57,6 +57,7 @@ def build_datacomp_loader(
     *,
     shuffle: bool = True,
     shuffle_buffer: int = 1_000,
+    max_samples: int | None = None,
 ) -> torch.utils.data.DataLoader[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Wrap a list of WebDataset tar shards in a :class:`DataLoader`.
 
@@ -75,6 +76,10 @@ def build_datacomp_loader(
             sample-shuffle buffer.  Higher values improve randomisation at
             the cost of RAM (~200 KB per PIL image slot).  Only used when
             ``shuffle=True``.
+        max_samples: If set, cap each epoch at this many samples.  Applied
+            after the shuffle buffer so every epoch sees a different random
+            subset (not always the same first-N samples).  Useful for quick
+            experiments with a fixed compute budget per epoch.
 
     Returns:
         A :class:`DataLoader` yielding
@@ -127,6 +132,9 @@ def build_datacomp_loader(
     # Pass handler here too so a bad JPEG inside an otherwise-valid tar is
     # skipped rather than aborting the epoch.
     dataset = pipeline.map(_preprocess, handler=wds.warn_and_continue)  # type: ignore[union-attr]
+
+    if max_samples is not None:
+        dataset = dataset.slice(max_samples)  # type: ignore[union-attr]
 
     return torch.utils.data.DataLoader(
         dataset,  # type: ignore[arg-type]
