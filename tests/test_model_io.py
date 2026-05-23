@@ -219,7 +219,7 @@ class TestTrainState:
         mio.save_train_state(optimizer, epoch=7, name=name, registry_dir=reg_dir)
         result = mio.load_train_state(name, registry_dir=reg_dir)
         assert result is not None
-        _, epoch = result
+        _, epoch, _ = result
         assert epoch == 7
 
     def test_round_trip_preserves_optimizer_state(
@@ -233,8 +233,45 @@ class TestTrainState:
         mio.save_train_state(optimizer, epoch=0, name=name, registry_dir=reg_dir)
         result = mio.load_train_state(name, registry_dir=reg_dir)
         assert result is not None
-        opt_state, _ = result
+        opt_state, _, _ = result
         assert opt_state["param_groups"] == original_state["param_groups"]
+
+    def test_round_trip_preserves_scheduler_state(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registry: tuple[pathlib.Path, str],
+    ) -> None:
+        _, optimizer = model_and_optimizer
+        reg_dir, name = registry
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda s: 1.0
+        )
+        # Advance the scheduler a few steps so its state is non-trivial.
+        for _ in range(5):
+            scheduler.step()
+        original_sched_state = scheduler.state_dict()
+        mio.save_train_state(
+            optimizer, epoch=0, name=name, scheduler=scheduler, registry_dir=reg_dir
+        )
+        result = mio.load_train_state(name, registry_dir=reg_dir)
+        assert result is not None
+        _, _, sched_state = result
+        assert sched_state is not None
+        assert sched_state["last_epoch"] == original_sched_state["last_epoch"]
+
+    def test_round_trip_scheduler_none_when_not_saved(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registry: tuple[pathlib.Path, str],
+    ) -> None:
+        """When saved without a scheduler, the loaded scheduler state is None."""
+        _, optimizer = model_and_optimizer
+        reg_dir, name = registry
+        mio.save_train_state(optimizer, epoch=0, name=name, registry_dir=reg_dir)
+        result = mio.load_train_state(name, registry_dir=reg_dir)
+        assert result is not None
+        _, _, sched_state = result
+        assert sched_state is None
 
     def test_load_returns_none_when_missing(
         self,

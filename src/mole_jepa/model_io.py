@@ -133,23 +133,36 @@ def _save_train_state_to(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     checkpoint_dir: pathlib.Path,
+    *,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
 ) -> None:
     """Write ``train_state.pt`` atomically to *checkpoint_dir*."""
     os.makedirs(checkpoint_dir, exist_ok=True)
     tmp = checkpoint_dir / (_TRAIN_STATE_FILE + ".tmp")
-    torch.save({"epoch": epoch, "optimizer_state_dict": optimizer.state_dict()}, tmp)
+    torch.save(
+        {
+            "epoch": epoch,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+        },
+        tmp,
+    )
     os.replace(tmp, checkpoint_dir / _TRAIN_STATE_FILE)
 
 
 def _load_train_state_from(
     checkpoint_dir: pathlib.Path,
-) -> tuple[dict[str, Any], int] | None:
+) -> tuple[dict[str, Any], int, dict[str, Any] | None] | None:
     """Read ``train_state.pt`` from *checkpoint_dir*, or return ``None``."""
     path = checkpoint_dir / _TRAIN_STATE_FILE
     if not path.exists():
         return None
     state: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=True)
-    return state["optimizer_state_dict"], state["epoch"]
+    return (
+        state["optimizer_state_dict"],
+        state["epoch"],
+        state.get("scheduler_state_dict"),
+    )
 
 
 # ── name-based public API ─────────────────────────────────────────────────────
@@ -257,9 +270,10 @@ def save_train_state(
     epoch: int,
     name: str,
     *,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     registry_dir: str | pathlib.Path | None = None,
 ) -> None:
-    """Save optimizer state and epoch for training resumption.
+    """Save optimizer state, LR scheduler state, and epoch for training resumption.
 
     Writes ``train_state.pt`` atomically.  Remove it with
     :func:`cleanup_train_state` once training completes successfully.
@@ -268,26 +282,30 @@ def save_train_state(
         optimizer: The optimizer whose state to persist.
         epoch: Most recently completed epoch (0-indexed).
         name: Registered model name.
+        scheduler: Optional LR scheduler whose state to persist alongside the
+            optimizer.  Pass ``None`` (default) when no scheduler is used.
         registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
     """
     ckpt = _checkpoint_dir_for(name, registry_dir)
-    _save_train_state_to(optimizer, epoch, ckpt)
+    _save_train_state_to(optimizer, epoch, ckpt, scheduler=scheduler)
 
 
 def load_train_state(
     name: str,
     *,
     registry_dir: str | pathlib.Path | None = None,
-) -> tuple[dict[str, Any], int] | None:
-    """Load optimizer state and epoch from a saved train state.
+) -> tuple[dict[str, Any], int, dict[str, Any] | None] | None:
+    """Load optimizer state, epoch, and optional scheduler state.
 
     Args:
         name: Registered model name.
         registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
 
     Returns:
-        ``(optimizer_state_dict, epoch)`` if a train state file exists,
-        ``None`` if no train state is present (fresh run).
+        ``(optimizer_state_dict, epoch, scheduler_state_dict)`` if a train
+        state file exists — ``scheduler_state_dict`` is ``None`` when the
+        checkpoint was saved without a scheduler.  Returns ``None`` entirely
+        if no train state is present (fresh run).
     """
     ckpt = _checkpoint_dir_for(name, registry_dir)
     return _load_train_state_from(ckpt)

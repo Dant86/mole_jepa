@@ -6,6 +6,7 @@ import dataclasses
 import datetime
 import json
 import logging
+import math
 import os
 import pathlib
 import signal
@@ -82,6 +83,26 @@ def parse_args() -> argparse.Namespace:
             "Cap the training set to this many samples per epoch.  Applied "
             "after the shuffle buffer so each epoch sees a different random "
             "subset.  Validation is unaffected.  Example: --max-train-samples 2000000."
+        ),
+    )
+    parser.add_argument(
+        "--lr-warmup-steps",
+        type=int,
+        default=500,
+        help=(
+            "Linear LR warm-up at the start of training: ramps from near-zero "
+            "to --lr over this many steps, then the cosine schedule takes over. "
+            "Set to 0 to disable warm-up.  Ignored when --max-train-samples is "
+            "not set (no per-step schedule without a known epoch length)."
+        ),
+    )
+    parser.add_argument(
+        "--lr-eta-min",
+        type=float,
+        default=None,
+        help=(
+            "Minimum LR at the bottom of each cosine cycle (default: lr / 10). "
+            "The LR decays from --lr to this value each epoch, then resets."
         ),
     )
     parser.add_argument(
@@ -361,6 +382,48 @@ def build_loader(
     )
 
 
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    steps_per_epoch: int,
+    warmup_steps: int,
+    eta_min: float,
+) -> torch.optim.lr_scheduler.LRScheduler:
+    """Build a per-step cosine LR scheduler with warm restarts and optional warmup.
+
+    Schedule:
+    * **Warmup** (steps 0 → ``warmup_steps``): LR rises linearly from
+      ``eta_min`` to the base LR.
+    * **Cosine decay with warm restarts**: after warmup, LR follows a cosine
+      curve from the base LR down to ``eta_min`` over ``steps_per_epoch``
+      steps, then resets to the base LR at the start of each new epoch.
+
+    Args:
+        optimizer: The optimizer to schedule.
+        steps_per_epoch: Number of optimizer steps per epoch (``max_train_batches``).
+        warmup_steps: Steps over which to linearly warm up from ``eta_min``
+            to the base LR.  Pass 0 to skip warmup.
+        eta_min: Floor LR at the bottom of each cosine cycle.
+
+    Returns:
+        A :class:`torch.optim.lr_scheduler.LambdaLR` instance.
+    """
+    base_lr: float = optimizer.param_groups[0]["lr"]
+    eta_fraction = eta_min / base_lr  # expressed as a multiplier on base_lr
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            # Linear ramp from eta_fraction → 1.0
+            return eta_fraction + (1.0 - eta_fraction) * step / warmup_steps
+        # Cosine decay with restarts every steps_per_epoch steps.
+        # The cosine phase starts at step=0 (or step=warmup_steps) and
+        # resets every steps_per_epoch steps regardless of warmup length.
+        step_in_cycle = (step - warmup_steps) % steps_per_epoch
+        cos = 0.5 * (1.0 + math.cos(math.pi * step_in_cycle / steps_per_epoch))
+        return eta_fraction + (1.0 - eta_fraction) * cos
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def log_stats(
     model_loc: pathlib.Path,
     epoch: int,
@@ -472,6 +535,7 @@ def run_epoch(
     *,
     train: bool,
     optimizer: torch.optim.Optimizer | None = None,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     grad_clip: float = 0.0,
     log_interval: int = 100,
     max_batches: int | None = None,
@@ -487,6 +551,8 @@ def run_epoch(
         train: If ``True``, run in training mode (gradient updates enabled).
             If ``False``, run in eval mode under :func:`torch.no_grad`.
         optimizer: Required when ``train=True``; ignored otherwise.
+        scheduler: Optional LR scheduler stepped once per optimizer step.
+            Pass ``None`` to use a fixed LR.
         grad_clip: Max gradient norm (0 disables clipping). Training only.
         log_interval: Print a per-step line every this many steps. Training only.
         max_batches: Stop after this many batches. ``None`` means no limit.
@@ -527,6 +593,8 @@ def run_epoch(
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
 
             for k, v in components.items():
                 totals[k] = totals.get(k, 0.0) + v
@@ -538,9 +606,12 @@ def run_epoch(
                 interval_t0 = now
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 parts = "  ".join(f"{k} {v:.4f}" for k, v in components.items())
+                current_lr = (
+                    optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
+                )
                 print(
                     f"[{ts}]  epoch {epoch:>3}  step {batch_idx + 1:>6}"
-                    f"  {parts}  samples/s {samples_per_sec:,.0f}"
+                    f"  {parts}  lr {current_lr:.2e}  samples/s {samples_per_sec:,.0f}"
                 )
 
     elapsed = time.monotonic() - epoch_t0
@@ -660,6 +731,29 @@ def main() -> None:
         fused=use_fused,
     )
 
+    # ── LR scheduler ─────────────────────────────────────────────────────────
+    # Build a per-step cosine schedule with warm restarts when the epoch
+    # length is known (max_train_batches is set).  Without a known epoch
+    # length we can't compute the cycle period, so we skip the scheduler and
+    # use a fixed LR.
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+    if max_train_batches is not None:
+        eta_min = args.lr_eta_min if args.lr_eta_min is not None else args.lr * 0.1
+        scheduler = _build_scheduler(
+            optimizer,
+            steps_per_epoch=max_train_batches,
+            warmup_steps=args.lr_warmup_steps,
+            eta_min=eta_min,
+        )
+        print(
+            f"LR schedule: cosine warm-restarts  "
+            f"steps_per_epoch={max_train_batches:,}  "
+            f"warmup={args.lr_warmup_steps}  "
+            f"eta_min={eta_min:.2e}"
+        )
+    else:
+        print("LR schedule: fixed (set --max-train-samples to enable cosine schedule)")
+
     # ── resume detection ──────────────────────────────────────────────────────
     # Load checkpoint BEFORE torch.compile.  compile() wraps the model in an
     # OptimizedModule that prefixes all state_dict keys with "_orig_mod.".
@@ -681,7 +775,7 @@ def main() -> None:
             args.config, registry_dir=args.registry_path or None
         )
         assert train_state is not None
-        opt_state_dict, last_epoch = train_state
+        opt_state_dict, last_epoch, sched_state_dict = train_state
         optimizer.load_state_dict(opt_state_dict)
         # load_state_dict restores the saved LR/weight-decay, which would
         # silently ignore any --lr / --weight-decay passed at the command line.
@@ -689,6 +783,8 @@ def main() -> None:
         for group in optimizer.param_groups:
             group["lr"] = args.lr
             group["weight_decay"] = args.weight_decay
+        if scheduler is not None and sched_state_dict is not None:
+            scheduler.load_state_dict(sched_state_dict)
         start_epoch = last_epoch + 1
         print(f"Resuming from epoch {start_epoch}")
     else:
@@ -715,6 +811,7 @@ def main() -> None:
             optimizer,
             current_epoch,
             args.config,
+            scheduler=scheduler,
             registry_dir=args.registry_path or None,
         )
         # Explicitly tear down DataLoader workers before exiting.  If we call
@@ -750,6 +847,7 @@ def main() -> None:
             epoch,
             train=True,
             optimizer=optimizer,
+            scheduler=scheduler,
             grad_clip=args.grad_clip,
             max_batches=effective_max_batches,
         )
@@ -772,7 +870,11 @@ def main() -> None:
         )
         model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
         model_io.save_train_state(
-            optimizer, epoch, args.config, registry_dir=args.registry_path or None
+            optimizer,
+            epoch,
+            args.config,
+            scheduler=scheduler,
+            registry_dir=args.registry_path or None,
         )
 
     # Training completed successfully.
