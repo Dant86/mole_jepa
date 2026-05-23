@@ -296,7 +296,6 @@ def build_loader(
     *,
     tar_paths: list[str] | None = None,
     shuffle: bool = True,
-    max_samples: int | None = None,
 ) -> torch.utils.data.DataLoader:  # type: ignore[type-arg]
     """Stream a dataset and wrap it in a :class:`DataLoader`.
 
@@ -312,6 +311,11 @@ def build_loader(
       :func:`datasets.load_dataset` and wrapped in
       :class:`~mole_jepa.data.CC3MDataset`.
 
+    To cap the number of samples per epoch, convert ``--max-train-samples``
+    to ``max_batches`` (``max_samples // batch_size``) and pass it to
+    :func:`run_epoch`.  Slicing inside the DataLoader pipeline applies
+    per-worker, not globally, so it does not reliably cap total sample count.
+
     Args:
         dataset_name: HF dataset identifier *or* local shard directory.
         split: Dataset split name (only used for the HF backend).
@@ -321,8 +325,6 @@ def build_loader(
             when using the HF backend.
         shuffle: Whether to shuffle shards and samples.  Pass ``False`` for
             the validation loader.
-        max_samples: Optional maximum number of training samples to observe.
-            If ``None``, uses the full training set. Defaults to ``None``.
 
     Returns:
         A :class:`DataLoader` yielding ``(pixel_values, input_ids,
@@ -332,7 +334,7 @@ def build_loader(
         paths = tar_paths or data_module.find_tar_shards(dataset_name)
         print(f"  WebDataset: {len(paths):,} shards from {dataset_name}")
         return data_module.build_datacomp_loader(
-            paths, data_config, device, shuffle=shuffle, max_samples=max_samples
+            paths, data_config, device, shuffle=shuffle
         )
 
     hf_ds = hf_datasets.load_dataset(dataset_name, split=split, streaming=True)
@@ -612,8 +614,18 @@ def main() -> None:
         device,
         tar_paths=train_tar_paths,
         shuffle=True,
-        max_samples=args.max_train_samples,
     )
+
+    # Convert sample cap to a batch cap for run_epoch.  Slicing the WebDataset
+    # pipeline would apply per-worker (not globally), so we enforce the limit
+    # in the training loop instead where the count is unambiguous.
+    max_train_batches: int | None = None
+    if args.max_train_samples is not None:
+        max_train_batches = args.max_train_samples // data_config.batch_size
+        print(
+            f"max_train_samples={args.max_train_samples:,}"
+            f" → max_train_batches={max_train_batches:,}"
+        )
     val_loader = build_loader(
         val_dataset_name,
         args.val_hf_dataset_split,
@@ -727,6 +739,9 @@ def main() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         current_epoch = epoch
 
+        # --max-batches (smoke-test override) takes precedence; otherwise use
+        # the value derived from --max-train-samples.
+        effective_max_batches = args.max_batches or max_train_batches
         train_stats, train_batches = run_epoch(
             model,
             loss_fn,
@@ -736,7 +751,7 @@ def main() -> None:
             train=True,
             optimizer=optimizer,
             grad_clip=args.grad_clip,
-            max_batches=args.max_batches,
+            max_batches=effective_max_batches,
         )
 
         val_stats: dict[str, float] | None = None

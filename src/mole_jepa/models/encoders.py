@@ -50,7 +50,8 @@ class ImageEncoder(nn.Module):
         Returns:
             Embedding tensor of shape `(B, embed_dim)`.
         """
-        vit_frozen = not next(self.vit.parameters()).requires_grad
+        first_param = next(iter(self.vit.parameters()), None)
+        vit_frozen = first_param is None or not first_param.requires_grad
         ctx: contextlib.AbstractContextManager = (
             torch.no_grad() if vit_frozen else contextlib.nullcontext()
         )
