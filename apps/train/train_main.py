@@ -120,7 +120,36 @@ def parse_args() -> argparse.Namespace:
         "--lr",
         type=float,
         default=1e-4,
-        help="AdamW learning rate.",
+        help="AdamW peak learning rate (applied to projection heads and predictor).",
+    )
+    parser.add_argument(
+        "--text-encoder-lr-multiplier",
+        type=float,
+        default=0.05,
+        help=(
+            "LR multiplier for the text encoder backbone (default: 0.05). "
+            "Effective LR = --lr × this value. Matches the VL-JEPA setting "
+            "that prevents over-adaptation of pretrained text representations."
+        ),
+    )
+    parser.add_argument(
+        "--image-encoder-lr-multiplier",
+        type=float,
+        default=0.05,
+        help=(
+            "LR multiplier for the image encoder backbone when unfrozen "
+            "(default: 0.05). Has no effect when freeze_image_encoder=True "
+            "in the model config (backbone has requires_grad=False)."
+        ),
+    )
+    parser.add_argument(
+        "--predictor-lr-multiplier",
+        type=float,
+        default=1.0,
+        help=(
+            "LR multiplier for the predictor MLP (default: 1.0). "
+            "Randomly initialised, so full LR is appropriate."
+        ),
     )
     parser.add_argument(
         "--weight-decay",
@@ -387,6 +416,7 @@ def _build_scheduler(
     steps_per_epoch: int,
     warmup_steps: int,
     eta_min: float,
+    base_lr: float,
 ) -> torch.optim.lr_scheduler.LRScheduler:
     """Build a per-step cosine LR scheduler with warm restarts and optional warmup.
 
@@ -397,17 +427,27 @@ def _build_scheduler(
       curve from the base LR down to ``eta_min`` over ``steps_per_epoch``
       steps, then resets to the base LR at the start of each new epoch.
 
+    The single lambda is broadcast across all param groups.  Since each group's
+    initial LR is already scaled by its per-component multiplier, the decay
+    fraction ``eta_fraction`` is expressed relative to ``base_lr`` (the peak
+    LR for projection heads and predictor) so that all groups decay
+    proportionally — e.g. the text backbone, initialised at
+    ``base_lr × text_encoder_lr_multiplier``, decays to
+    ``eta_min × text_encoder_lr_multiplier``.
+
     Args:
         optimizer: The optimizer to schedule.
         steps_per_epoch: Number of optimizer steps per epoch (``max_train_batches``).
         warmup_steps: Steps over which to linearly warm up from ``eta_min``
             to the base LR.  Pass 0 to skip warmup.
-        eta_min: Floor LR at the bottom of each cosine cycle.
+        eta_min: Floor LR at the bottom of each cosine cycle for the peak-LR
+            groups (projection heads and predictor).
+        base_lr: Peak learning rate (``--lr``).  Used to compute the decay
+            fraction applied uniformly across all param groups.
 
     Returns:
         A :class:`torch.optim.lr_scheduler.LambdaLR` instance.
     """
-    base_lr: float = optimizer.param_groups[0]["lr"]
     eta_fraction = eta_min / base_lr  # expressed as a multiplier on base_lr
 
     def lr_lambda(step: int) -> float:
@@ -721,12 +761,67 @@ def main() -> None:
         suffix = " (text encoder only — ViT is frozen)" if frozen else ""
         print(f"Gradient checkpointing enabled{suffix}")
 
+    # ── per-component param groups ────────────────────────────────────────────
+    # Each component gets its own LR via a multiplier on the peak --lr.
+    # Pretrained backbones use a small multiplier to avoid overwriting their
+    # pretrained representations; randomly initialised heads use 1.0.
+    # We store "lr_multiplier" in each group so the resume logic can restore
+    # the correct per-group LR from --lr without hardcoding the values.
+    param_groups: list[dict] = []
+
+    img_backbone_params = [
+        p for p in model.image_encoder.vit.parameters() if p.requires_grad
+    ]
+    if img_backbone_params:
+        param_groups.append(
+            {
+                "params": img_backbone_params,
+                "lr": args.lr * args.image_encoder_lr_multiplier,
+                "lr_multiplier": args.image_encoder_lr_multiplier,
+            }
+        )
+
+    param_groups.append(
+        {
+            "params": list(model.image_encoder.projection.parameters()),
+            "lr": args.lr,
+            "lr_multiplier": 1.0,
+        }
+    )
+    param_groups.append(
+        {
+            "params": list(model.text_encoder.lm.parameters()),
+            "lr": args.lr * args.text_encoder_lr_multiplier,
+            "lr_multiplier": args.text_encoder_lr_multiplier,
+        }
+    )
+    param_groups.append(
+        {
+            "params": list(model.text_encoder.projection.parameters()),
+            "lr": args.lr,
+            "lr_multiplier": 1.0,
+        }
+    )
+    param_groups.append(
+        {
+            "params": list(model.predictor.parameters()),
+            "lr": args.lr * args.predictor_lr_multiplier,
+            "lr_multiplier": args.predictor_lr_multiplier,
+        }
+    )
+
+    for pg in param_groups:
+        print(
+            f"  param group lr={pg['lr']:.2e}"
+            f"  (×{pg['lr_multiplier']})  "
+            f"  n_params={sum(p.numel() for p in pg['params']):,}"
+        )
+
     # fused=True merges the optimizer step into a single CUDA kernel, cutting
     # per-step overhead by ~5–10%.  Only available on CUDA.
     use_fused = device.type == "cuda" and torch.cuda.is_available()
     optimizer: torch.optim.Optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
+        param_groups,
         weight_decay=args.weight_decay,
         fused=use_fused,
     )
@@ -744,6 +839,7 @@ def main() -> None:
             steps_per_epoch=max_train_batches,
             warmup_steps=args.lr_warmup_steps,
             eta_min=eta_min,
+            base_lr=args.lr,
         )
         print(
             f"LR schedule: cosine warm-restarts  "
@@ -779,9 +875,11 @@ def main() -> None:
         optimizer.load_state_dict(opt_state_dict)
         # load_state_dict restores the saved LR/weight-decay, which would
         # silently ignore any --lr / --weight-decay passed at the command line.
-        # Override the param groups so CLI flags always win on resume.
+        # Override each param group so CLI flags always win on resume.
+        # lr_multiplier was stored in the group dict at optimizer construction
+        # so we can recompute the correct per-component LR here.
         for group in optimizer.param_groups:
-            group["lr"] = args.lr
+            group["lr"] = args.lr * group.get("lr_multiplier", 1.0)
             group["weight_decay"] = args.weight_decay
         if scheduler is not None and sched_state_dict is not None:
             scheduler.load_state_dict(sched_state_dict)
