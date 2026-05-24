@@ -266,8 +266,8 @@ def spearman_pearson(
 
     p = pred.numpy()
     t = target.numpy()
-    spearman: float = spearmanr(p, t).correlation  # type: ignore[attr-defined]
-    pearson: float = pearsonr(p, t).statistic  # type: ignore[attr-defined]
+    spearman = float(spearmanr(p, t).correlation)  # type: ignore[attr-defined]
+    pearson = float(pearsonr(p, t).statistic)  # type: ignore[attr-defined]
     return spearman, pearson
 
 
