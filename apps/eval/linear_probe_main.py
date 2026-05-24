@@ -122,12 +122,7 @@ def parse_args() -> argparse.Namespace:
         default=256,
         help="Batch size for image encoding (default: 256).",
     )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=4,
-        help="DataLoader workers for encoding (default: 4).",
-    )
+
     parser.add_argument(
         "--probe-epochs",
         type=int,
@@ -160,7 +155,6 @@ def encode_dataset(
     image_field: str,
     image_transform: Any,
     batch_size: int,
-    num_workers: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Encode all images in *hf_ds* with the frozen image encoder.
@@ -171,7 +165,6 @@ def encode_dataset(
         image_field: Name of the PIL image column.
         image_transform: Callable that converts a PIL image to a tensor.
         batch_size: Encoding batch size.
-        num_workers: DataLoader worker count.
         device: Inference device.
 
     Returns:
@@ -197,10 +190,14 @@ def encode_dataset(
         }
         return imgs, lbls
 
+    # num_workers=0: the HF dataset is already in RAM and the bottleneck is
+    # GPU throughput, not data loading.  Workers would require pickling the
+    # _collate closure (which captures image_transform), which fails under
+    # Python 3.14's forkserver start method on Linux.
     loader = torch.utils.data.DataLoader(
         hf_ds,  # type: ignore[arg-type]
         batch_size=batch_size,
-        num_workers=num_workers,
+        num_workers=0,
         collate_fn=_collate,
         shuffle=False,
         pin_memory=(device.type == "cuda"),
@@ -386,7 +383,6 @@ def main() -> None:
             ds_cfg["image_field"],
             image_transform,
             args.batch_size,
-            args.num_workers,
             device,
         )
         print(f"  {train_embs.shape} in {time.perf_counter() - t0:.1f}s")
@@ -399,7 +395,6 @@ def main() -> None:
             ds_cfg["image_field"],
             image_transform,
             args.batch_size,
-            args.num_workers,
             device,
         )
         print(f"  {test_embs.shape} in {time.perf_counter() - t0:.1f}s")
