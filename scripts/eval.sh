@@ -46,6 +46,9 @@ source .env
 mkdir -p "${LOG_DIR}"
 exec > "${LOG_DIR}/eval_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/eval_${SLURM_JOB_ID}.err"
 
+# Export HF_TOKEN so the datasets library can make authenticated requests.
+export HF_TOKEN="${HF_TOKEN:-}"
+
 uv sync
 
 # ── evaluate ──────────────────────────────────────────────────────────────────

@@ -13,24 +13,41 @@ _CAPTIONS_PER_IMAGE = 5
 
 
 class COCODataset:
-    """COCO dataset for image-text retrieval benchmarking.
+    """Dataset wrapper for image-text retrieval benchmarking.
 
-    Pre-processes all images and captions at construction time and stores
-    them as :class:`torch.utils.data.TensorDataset` instances. Captions are
-    kept in image-grouped order so that the captions for image *i* occupy
-    positions ``[i * captions_per_image, (i + 1) * captions_per_image)``;
-    this ordering is required by
-    :func:`~mole_jepa.evaluation.retrieval.retrieval_metrics`.
+    Supports two row layouts:
 
-    Use :meth:`image_loader` and :meth:`caption_loader` to obtain
-    DataLoaders for the two encoder passes during evaluation.
+    **Grouped** (``flat=False``, default)
+        One row per image; the caption column contains a list of strings.
+        Compatible with HuggingFace COCO-style datasets.
+
+    **Flat** (``flat=True``)
+        One row per ``(image, caption)`` pair; the caption column is a plain
+        string.  Consecutive ``captions_per_image`` rows are assumed to share
+        the same image (the ordering produced by img2dataset / WebDataset).
+        Compatible with ``clip-benchmark/wds_flickr30k`` and similar repos.
+
+    In both modes captions are stored in image-grouped order so that the
+    captions for image *i* occupy positions
+    ``[i * captions_per_image, (i + 1) * captions_per_image)``, as required
+    by :func:`~mole_jepa.evaluation.retrieval.retrieval_metrics`.
+
+    Use :meth:`image_loader` and :meth:`caption_loader` to obtain DataLoaders
+    for the two encoder passes during evaluation.
 
     Args:
-        hf_dataset: HuggingFace dataset with ``"image"`` (PIL image) and
-            ``caption_field`` (list of strings) columns.
+        hf_dataset: Iterable of dataset rows (e.g. a HuggingFace ``Dataset``).
         config: Data configuration supplying processor and tokenizer settings.
-        captions_per_image: Number of captions to retain per image.
-        caption_field: Name of the captions column in ``hf_dataset``.
+        captions_per_image: Number of captions per image.  In grouped mode,
+            only the first ``captions_per_image`` captions from each row are
+            used.  In flat mode, exactly ``captions_per_image`` consecutive
+            rows are consumed per image.
+        caption_field: Name of the caption column (default: ``"captions"``).
+        image_field: Name of the image column (default: ``"image"``).
+            Use ``"jpg"`` for clip-benchmark WebDataset-derived repos.
+        flat: If ``True``, treat each row as one ``(image, caption)`` pair
+            and group ``captions_per_image`` consecutive rows per image.
+            Defaults to ``False``.
     """
 
     def __init__(
@@ -39,6 +56,8 @@ class COCODataset:
         config: config_module.DataConfig,
         captions_per_image: int = _CAPTIONS_PER_IMAGE,
         caption_field: str = "captions",
+        image_field: str = "image",
+        flat: bool = False,
     ) -> None:
         image_transform = transforms.build_image_transform(
             config.image_processor_model_name
@@ -52,12 +71,39 @@ class COCODataset:
         input_ids: list[torch.Tensor] = []
         attention_masks: list[torch.Tensor] = []
 
-        for example in hf_dataset:
-            pixel_values.append(image_transform(example["image"]))
-            for caption in example[caption_field][:captions_per_image]:
-                ids, mask = tokenize(caption)
-                input_ids.append(ids)
-                attention_masks.append(mask)
+        if flat:
+            # Each row is one (image, caption) string pair.  Consume
+            # captions_per_image consecutive rows and emit one image tensor.
+            buf: list[dict[str, Any]] = []
+            for example in hf_dataset:
+                buf.append(example)
+                if len(buf) == captions_per_image:
+                    pixel_values.append(image_transform(buf[0][image_field]))
+                    for row in buf:
+                        ids, mask = tokenize(str(row[caption_field]))
+                        input_ids.append(ids)
+                        attention_masks.append(mask)
+                    buf = []
+            # Partial trailing group — include it with however many captions
+            # are available (retrieval_metrics tolerates uneven tails).
+            if buf:
+                pixel_values.append(image_transform(buf[0][image_field]))
+                for row in buf:
+                    ids, mask = tokenize(str(row[caption_field]))
+                    input_ids.append(ids)
+                    attention_masks.append(mask)
+                # Pad caption count so shapes stay consistent.
+                while len(input_ids) % captions_per_image != 0:
+                    ids, mask = tokenize("")
+                    input_ids.append(ids)
+                    attention_masks.append(mask)
+        else:
+            for example in hf_dataset:
+                pixel_values.append(image_transform(example[image_field]))
+                for caption in example[caption_field][:captions_per_image]:
+                    ids, mask = tokenize(caption)
+                    input_ids.append(ids)
+                    attention_masks.append(mask)
 
         self._images = torch.utils.data.TensorDataset(torch.stack(pixel_values))
         self._captions = torch.utils.data.TensorDataset(

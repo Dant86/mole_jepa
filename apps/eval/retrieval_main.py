@@ -82,16 +82,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    # ── COCO ─────────────────────────────────────────────────────────────────
+    # ── evaluation dataset ────────────────────────────────────────────────────
     parser.add_argument(
         "--coco-dataset",
-        default="nlphuji/flickr30k",
+        default="clip-benchmark/wds_flickr30k",
         metavar="DATASET",
         help=(
-            "HuggingFace dataset identifier or local path for the evaluation "
-            "dataset. Defaults to 'nlphuji/flickr30k' (a 5-caption-per-image "
-            "dataset compatible with the COCO-style R@K evaluation). "
-            "Use 'HuggingFaceM4/COCO' for COCO proper."
+            "HuggingFace dataset identifier (must be Parquet-native, not a "
+            "loading script). Defaults to 'clip-benchmark/wds_flickr30k' "
+            "(31k images, 5 captions each, no auth required). "
+            "For COCO proper use 'yerevann/coco-karpathy' with "
+            "--coco-split test --caption-field sentences."
         ),
     )
     parser.add_argument(
@@ -101,12 +102,21 @@ def parse_args() -> argparse.Namespace:
         help="Dataset split to evaluate on (default: 'test').",
     )
     parser.add_argument(
-        "--caption-field",
-        default="caption",
+        "--image-field",
+        default="jpg",
         metavar="FIELD",
         help=(
-            "Name of the captions column in the HuggingFace dataset. "
-            "Defaults to 'caption' (Flickr30k). Use 'captions' for COCO."
+            "Name of the image column in the dataset "
+            "(default: 'jpg' for clip-benchmark/wds_flickr30k)."
+        ),
+    )
+    parser.add_argument(
+        "--caption-field",
+        default="txt",
+        metavar="FIELD",
+        help=(
+            "Name of the captions column in the dataset "
+            "(default: 'txt' for clip-benchmark/wds_flickr30k)."
         ),
     )
     parser.add_argument(
@@ -114,6 +124,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Number of captions per image in the evaluation set (default: 5).",
+    )
+    parser.add_argument(
+        "--flat",
+        action="store_true",
+        help=(
+            "Treat each dataset row as a single (image, caption) pair and "
+            "group consecutive --captions-per-image rows per image. "
+            "Required for clip-benchmark/wds_flickr30k and other WebDataset "
+            "repos where the caption field is a plain string."
+        ),
     )
 
     # ── data / inference ──────────────────────────────────────────────────────
@@ -242,7 +262,6 @@ def main() -> None:
     hf_ds = hf_datasets.load_dataset(  # type: ignore[call-overload]
         args.coco_dataset,
         split=args.coco_split,
-        trust_remote_code=True,
     )
     print(f"  Loaded {len(hf_ds):,} examples in {time.perf_counter() - t0:.1f}s")
 
@@ -284,6 +303,8 @@ def main() -> None:
             config=data_cfg,
             captions_per_image=args.captions_per_image,
             caption_field=args.caption_field,
+            image_field=args.image_field,
+            flat=args.flat,
         )
         print(
             f"  {coco.n_images:,} images × {coco.captions_per_image} captions "
