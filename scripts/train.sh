@@ -32,6 +32,9 @@ export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 # Reduces CUDA allocator fragmentation at large batch sizes.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Redirect temp dirs to scratch so DataLoader shared-memory files (pymp-*)
+# and HuggingFace caches don't fill up the small /tmp on compute nodes.
+mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh

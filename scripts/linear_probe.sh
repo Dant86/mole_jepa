@@ -25,6 +25,7 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
+mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
