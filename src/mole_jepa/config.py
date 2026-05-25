@@ -26,8 +26,11 @@ class ModelConfig:
         sigreg_demean: If ``True``, subtract the batch mean before applying
             SIGReg, removing the zero-mean constraint so each modality can
             maintain its own offset in the embedding space.
-        jepa_lam: Regularization weight λ for JEPALoss. The MSE weight is
-            ``1 - jepa_lam``. Default 0.05 per the LeJEPA paper.
+        jepa_lam_image: SIGReg weight for image embeddings ``z_v``. Default
+            0.05. Has no effect when ``jepa_regularize_z_i=False``.
+        jepa_lam_text: SIGReg weight for text embeddings ``z_t``. Default
+            0.05. Increase (e.g. 0.3–0.5) to push harder against directional
+            collapse of the text encoder.
         jepa_regularize_z_i: If ``True`` (default), apply SIGReg to the image
             embeddings ``z_v``. Set to ``False`` when the image encoder is
             frozen — MSE already prevents projection collapse, so regularizing
@@ -57,7 +60,8 @@ class ModelConfig:
     sigreg_dist: Literal["gaussian", "laplace"] = "gaussian"
     sigreg_n_directions: int = 128
     sigreg_demean: bool = False
-    jepa_lam: float = 0.05
+    jepa_lam_image: float = 0.05
+    jepa_lam_text: float = 0.05
     jepa_regularize_z_i: bool = True
     jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07

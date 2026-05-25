@@ -563,6 +563,9 @@ def _forward_loss(
         "loss_mse": jepa_out.loss_mse.item(),
         "loss_reg_image": jepa_out.loss_reg_image.item(),
         "loss_reg_text": jepa_out.loss_reg_text.item(),
+        "z_v_norm": output.z_v.norm(dim=-1).mean().item(),
+        "z_t_norm": output.z_t.norm(dim=-1).mean().item(),
+        "z_hat_t_norm": output.z_hat_t.norm(dim=-1).mean().item(),
     }
 
 

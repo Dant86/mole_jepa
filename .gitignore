@@ -1,6 +1,9 @@
 # Local environment — contains paths and secrets
 .env
 
+# Scratch notebooks — local experiments, not for the repo
+_scratch/
+
 # Claude Code project files
 .claude/
 

@@ -71,10 +71,13 @@ class TestBuild:
     def test_jepa_lam_propagates(
         self, mock_pretrained: unittest.mock.MagicMock
     ) -> None:
-        lam = 0.2
-        _, loss = factory_module.build(config_module.ModelConfig(jepa_lam=lam))
+        lam_image, lam_text = 0.1, 0.4
+        _, loss = factory_module.build(
+            config_module.ModelConfig(jepa_lam_image=lam_image, jepa_lam_text=lam_text)
+        )
         assert isinstance(loss, losses.JEPALoss)
-        assert loss.lam == pytest.approx(lam)
+        assert loss.lam_image == pytest.approx(lam_image)
+        assert loss.lam_text == pytest.approx(lam_text)
 
     def test_freeze_image_encoder_freezes_vit(
         self, mock_pretrained: unittest.mock.MagicMock

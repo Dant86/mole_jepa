@@ -9,7 +9,8 @@ from mole_jepa.models import mole_jepa as mole_jepa_module
 _N = 64
 _D = 16
 _SEED = 42
-_LAM = 0.05  # matches the JEPALoss default
+_LAM_IMAGE = 0.05  # matches the JEPALoss default
+_LAM_TEXT = 0.05  # matches the JEPALoss default
 
 
 def _make_output(
@@ -27,7 +28,7 @@ def _make_output(
 @pytest.fixture
 def loss_fn() -> losses.JEPALoss:
     reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-    return losses.JEPALoss(regularizer=reg, lam=_LAM)
+    return losses.JEPALoss(regularizer=reg, lam_image=_LAM_IMAGE, lam_text=_LAM_TEXT)
 
 
 class TestJEPALoss:
@@ -48,17 +49,18 @@ class TestJEPALoss:
         assert result.loss_mse.item() == pytest.approx(0.0, abs=1e-6)
 
     def test_lam_zero_loss_equals_mse(self) -> None:
-        """When lam=0 the regularization term vanishes and loss == MSE."""
+        """When lam_image=lam_text=0 the regularization terms vanish and loss == MSE."""
         reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-        loss_fn = losses.JEPALoss(regularizer=reg, lam=0.0)
+        loss_fn = losses.JEPALoss(regularizer=reg, lam_image=0.0, lam_text=0.0)
         result = loss_fn(_make_output())
         assert result.loss.item() == pytest.approx(result.loss_mse.item())
 
     def test_loss_decomposition(self, loss_fn: losses.JEPALoss) -> None:
         result = loss_fn(_make_output())
         expected = (
-            _LAM * (result.loss_reg_image.item() + result.loss_reg_text.item())
-            + (1 - _LAM) * result.loss_mse.item()
+            _LAM_IMAGE * result.loss_reg_image.item()
+            + _LAM_TEXT * result.loss_reg_text.item()
+            + result.loss_mse.item()
         )
         assert result.loss.item() == pytest.approx(expected, rel=1e-5)
 
@@ -75,7 +77,12 @@ class TestJEPALoss:
     def test_regularize_z_i_false_zeroes_image_reg(self) -> None:
         """regularize_z_i=False sets loss_reg_image to zero."""
         reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-        loss_fn = losses.JEPALoss(regularizer=reg, lam=_LAM, regularize_z_i=False)
+        loss_fn = losses.JEPALoss(
+            regularizer=reg,
+            lam_image=_LAM_IMAGE,
+            lam_text=_LAM_TEXT,
+            regularize_z_i=False,
+        )
         result = loss_fn(_make_output())
         assert result.loss_reg_image.item() == pytest.approx(0.0)
         assert result.loss_reg_text.item() > 0.0
@@ -83,18 +90,25 @@ class TestJEPALoss:
     def test_regularize_z_t_false_zeroes_text_reg(self) -> None:
         """regularize_z_t=False sets loss_reg_text to zero."""
         reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
-        loss_fn = losses.JEPALoss(regularizer=reg, lam=_LAM, regularize_z_t=False)
+        loss_fn = losses.JEPALoss(
+            regularizer=reg,
+            lam_image=_LAM_IMAGE,
+            lam_text=_LAM_TEXT,
+            regularize_z_t=False,
+        )
         result = loss_fn(_make_output())
         assert result.loss_reg_text.item() == pytest.approx(0.0)
         assert result.loss_reg_image.item() > 0.0
 
     def test_regularize_both_false_loss_equals_mse(self) -> None:
-        """With both reg flags off, total loss == (1 - lam) * MSE."""
+        """With both reg flags off, total loss == MSE."""
         reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
         loss_fn = losses.JEPALoss(
-            regularizer=reg, lam=_LAM, regularize_z_i=False, regularize_z_t=False
+            regularizer=reg,
+            lam_image=_LAM_IMAGE,
+            lam_text=_LAM_TEXT,
+            regularize_z_i=False,
+            regularize_z_t=False,
         )
         result = loss_fn(_make_output())
-        assert result.loss.item() == pytest.approx(
-            (1 - _LAM) * result.loss_mse.item(), rel=1e-5
-        )
+        assert result.loss.item() == pytest.approx(result.loss_mse.item(), rel=1e-5)

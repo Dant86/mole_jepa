@@ -50,7 +50,8 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
                 n_directions=config.sigreg_n_directions,
                 demean=config.sigreg_demean,
             ),
-            lam=config.jepa_lam,
+            lam_image=config.jepa_lam_image,
+            lam_text=config.jepa_lam_text,
             regularize_z_i=config.jepa_regularize_z_i,
             regularize_z_t=config.jepa_regularize_z_t,
         )
