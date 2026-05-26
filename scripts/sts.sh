@@ -14,6 +14,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=0:20:00
+# Log paths are set after sourcing .env — SLURM directives can't read env files,
+# so we redirect manually below.
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
@@ -23,7 +25,6 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
-mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -39,6 +40,8 @@ source .env
 
 mkdir -p "${LOG_DIR}"
 exec > "${LOG_DIR}/sts_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/sts_${SLURM_JOB_ID}.err"
+
+mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 
 export HF_TOKEN="${HF_TOKEN:-}"
 
