@@ -18,11 +18,18 @@
 #SBATCH --time=0:30:00
 # Log paths are set after sourcing .env — SLURM directives can't read env files,
 # so we redirect manually below.
-#SBATCH --output=/dev/null
-#SBATCH --error=/dev/null
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
 # ── environment ───────────────────────────────────────────────────────────────
 set -euo pipefail
+
+# Load all paths and secrets from .env.
+if [[ ! -f .env ]]; then
+    echo "ERROR: .env not found in ${SLURM_SUBMIT_DIR}. Copy .env.sample and fill in your values." >&2
+    exit 1
+fi
+source .env
 
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONUNBUFFERED=1
@@ -33,12 +40,6 @@ if ! command -v uv &> /dev/null; then
 fi
 
 cd "$SLURM_SUBMIT_DIR"
-
-if [[ ! -f .env ]]; then
-    echo "ERROR: .env not found in ${SLURM_SUBMIT_DIR}." >&2
-    exit 1
-fi
-source .env
 
 mkdir -p "${LOG_DIR}"
 exec > "${LOG_DIR}/probe_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/probe_${SLURM_JOB_ID}.err"

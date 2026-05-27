@@ -14,6 +14,13 @@ Usage examples::
         --from-entry vit_base_bert_jepa_frozen \
         --description "Lower LR experiment"
 
+    # Clone an entry and override specific fields
+    uv run python apps/registry/register.py \
+        --name vit_base_bert_jepa_laplace \
+        --from-entry vit_base_bert_jepa_frozen \
+        --override-json '{"sigreg_dist": "laplace"}' \
+        --description "Laplace SIGReg ablation"
+
     # Register a model by supplying the full config as JSON
     uv run python apps/registry/register.py \
         --name my_experiment \
@@ -79,6 +86,17 @@ def _cmd_register(args: argparse.Namespace) -> None:
     if args.from_entry:
         source = nfs_registry.get_entry(args.from_entry, args.registry_path)
         model_config = source.config
+        if args.override_json:
+            try:
+                overrides = json.loads(args.override_json)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"Invalid --override-json: {exc}") from exc
+            try:
+                import dataclasses
+
+                model_config = dataclasses.replace(model_config, **overrides)
+            except TypeError as exc:
+                raise SystemExit(f"Invalid override fields: {exc}") from exc
     else:
         try:
             fields = json.loads(args.config_json)
@@ -145,6 +163,14 @@ def main() -> None:
         "--from-entry",
         metavar="NAME",
         help="Clone the config from an existing registry entry.",
+    )
+    parser.add_argument(
+        "--override-json",
+        metavar="JSON",
+        help=(
+            "JSON object of ModelConfig fields to override when using --from-entry. "
+            'E.g. \'{"sigreg_dist": "laplace"}\''
+        ),
     )
     parser.add_argument(
         "--config-json",
