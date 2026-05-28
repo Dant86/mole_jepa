@@ -4,20 +4,20 @@ repos:
       - id: ruff
         name: ruff
         language: system
-        entry: bash -c 'uv run ruff check --fix "$@"; git add "$@"; uv run ruff check "$@"' _
+        entry: bash -c 'export PATH="$HOME/.local/bin:$PATH"; uv run ruff check --fix "$@"; git add "$@"; uv run ruff check "$@"' _
         types: [python]
         pass_filenames: true
 
       - id: ruff-format
         name: ruff-format
         language: system
-        entry: bash -c 'uv run ruff format "$@" && git add "$@"' _
+        entry: bash -c 'export PATH="$HOME/.local/bin:$PATH"; uv run ruff format "$@" && git add "$@"' _
         types: [python]
         pass_filenames: true
 
       - id: pyright
         name: pyright
-        entry: uv run pyright
+        entry: bash -c 'export PATH="$HOME/.local/bin:$PATH"; uv run pyright "$@"' _
         language: system
         types: [python]
         pass_filenames: false

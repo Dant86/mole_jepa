@@ -60,4 +60,5 @@ uv sync
 #       --coco-split test
 uv run python apps/eval/retrieval_main.py \
     --registry-path "${REGISTRY_PATH}" \
+    --flat \
     "$@"

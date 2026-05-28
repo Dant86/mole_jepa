@@ -170,13 +170,22 @@ def encode_images(
     model: models.MoLeJEPA,
     loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
     device: torch.device,
+    use_predictor: bool = False,
 ) -> torch.Tensor:
     """Encode all images from *loader* and return the stacked embeddings.
+
+    For JEPA models, pass ``use_predictor=True`` to run image embeddings
+    through the predictor before retrieval.  The predictor maps ``z_v`` into
+    the text embedding space (``ẑ_t``), which is what should be compared
+    against text embeddings at retrieval time.  For contrastive models both
+    encoders are directly aligned, so the predictor is not needed.
 
     Args:
         model: The MoLeJEPA model whose image encoder to use.
         loader: DataLoader yielding ``(pixel_values,)`` tuples.
         device: Target device for inference.
+        use_predictor: If ``True``, pass ``z_v`` through ``model.predictor``
+            before returning.
 
     Returns:
         Float tensor of shape ``(N, embed_dim)`` on CPU.
@@ -186,6 +195,8 @@ def encode_images(
     for (pixel_values,) in loader:
         pixel_values = pixel_values.to(device)
         emb = model.image_encoder(pixel_values)
+        if use_predictor:
+            emb = model.predictor(emb)
         parts.append(emb.cpu())
     return torch.cat(parts, dim=0)
 
@@ -321,9 +332,18 @@ def main() -> None:
         )
 
         # ── encode ────────────────────────────────────────────────────────────
-        print("Encoding images …")
+        # For JEPA models the predictor maps z_v into the text embedding space;
+        # retrieval compares ẑ_t = predictor(z_v) against z_t.
+        # For contrastive models both encoders are directly aligned.
+        use_predictor = not entry.config.contrastive
+        print(
+            f"Encoding images "
+            f"({'z_v → predictor → ẑ_t' if use_predictor else 'z_v direct'}) …"
+        )
         t0 = time.perf_counter()
-        image_embs = encode_images(model, img_loader, device)
+        image_embs = encode_images(
+            model, img_loader, device, use_predictor=use_predictor
+        )
         print(f"  {image_embs.shape} in {time.perf_counter() - t0:.1f}s")
 
         print("Encoding captions …")
