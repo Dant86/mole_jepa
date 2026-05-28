@@ -1,8 +1,24 @@
-"""Linear probe evaluation for MoLeJEPA image encoders.
+r"""Linear probe evaluation for MoLeJEPA image encoders.
 
-Encodes all images from a classification dataset with a frozen model, then
+Encodes all images from a classification dataset with a frozen encoder, then
 trains a single linear layer on the resulting embeddings.  No fine-tuning of
 the encoder — weights are frozen throughout.
+
+Three encoders are compared for each registered model:
+
+``full``
+    The trained image encoder: ViT backbone + trained projection head.
+    This is what the model actually uses at inference time.
+
+``backbone``
+    ViT backbone only (no projection), using weights from the trained model.
+    Output is the CLS token in the ViT's native hidden dimension.  Tells you
+    whether the projection head adds or removes discriminative information.
+
+``baseline``
+    Vanilla ViT loaded fresh from HuggingFace with no training on our data.
+    This is the quality ceiling for the ViT's native representations — if the
+    trained models score lower, our training degraded the ViT.
 
 Supported datasets (all fetched from HuggingFace):
 
@@ -11,15 +27,15 @@ Supported datasets (all fetched from HuggingFace):
 
 Usage::
 
-    uv run python apps/eval/linear_probe_main.py \
-        --config vit_small_miniml_jepa_frozen \
+    uv run python apps/eval/linear_probe_main.py \\
+        --config vit_small_miniml_jepa_frozen \\
         --dataset tanganke/stl10
 
     # Evaluate multiple models side-by-side on CIFAR-100
-    uv run python apps/eval/linear_probe_main.py \
-        --config vit_small_miniml_jepa_frozen \
-                 vit_small_miniml_jepa_unfrozen \
-                 vit_small_miniml_infonce_frozen \
+    uv run python apps/eval/linear_probe_main.py \\
+        --config vit_small_miniml_jepa_frozen \\
+                 vit_small_miniml_jepa_unfrozen \\
+                 vit_small_miniml_infonce_frozen \\
         --dataset uoft-cs/cifar100
 
 Results are printed to stdout and appended to ``linear_probe_results.jsonl``
@@ -44,6 +60,8 @@ import torch.utils.data
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+
+import transformers  # noqa: E402
 
 from mole_jepa import config as config_module  # noqa: E402
 from mole_jepa import model_io, models, nfs_registry  # noqa: E402
@@ -122,7 +140,6 @@ def parse_args() -> argparse.Namespace:
         default=256,
         help="Batch size for image encoding (default: 256).",
     )
-
     parser.add_argument(
         "--probe-epochs",
         type=int,
@@ -148,37 +165,14 @@ def parse_args() -> argparse.Namespace:
 # ── encoding ──────────────────────────────────────────────────────────────────
 
 
-@torch.inference_mode()
-def encode_dataset(
-    model: models.MoLeJEPA,
+def _make_loader(
     hf_ds: hf_datasets.Dataset,  # type: ignore[name-defined]
     image_field: str,
     image_transform: Any,
     batch_size: int,
     device: torch.device,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Encode all images in *hf_ds* with the frozen image encoder.
-
-    Args:
-        model: MoLeJEPA model whose image encoder to use.
-        hf_ds: HuggingFace dataset split.
-        image_field: Name of the PIL image column.
-        image_transform: Callable that converts a PIL image to a tensor.
-        batch_size: Encoding batch size.
-        device: Inference device.
-
-    Returns:
-        A tuple ``(embeddings, labels)`` where ``embeddings`` is a float
-        tensor of shape ``(N, embed_dim)`` on CPU and ``labels`` is a dict
-        mapping each label column name to a long tensor of shape ``(N,)``.
-    """
-    model.eval()
-
-    label_cols = [
-        c
-        for c in hf_ds.column_names
-        if c != image_field  # type: ignore[union-attr]
-    ]
+) -> torch.utils.data.DataLoader:  # type: ignore[type-arg]
+    label_cols = [c for c in hf_ds.column_names if c != image_field]  # type: ignore[union-attr]
 
     def _collate(
         batch: list[dict[str, Any]],
@@ -190,11 +184,10 @@ def encode_dataset(
         }
         return imgs, lbls
 
-    # num_workers=0: the HF dataset is already in RAM and the bottleneck is
-    # GPU throughput, not data loading.  Workers would require pickling the
-    # _collate closure (which captures image_transform), which fails under
-    # Python 3.14's forkserver start method on Linux.
-    loader = torch.utils.data.DataLoader(
+    # num_workers=0: HF dataset is already in RAM; bottleneck is GPU throughput.
+    # Workers require pickling _collate (which captures image_transform), which
+    # fails under Python 3.14's forkserver start method on Linux.
+    return torch.utils.data.DataLoader(
         hf_ds,  # type: ignore[arg-type]
         batch_size=batch_size,
         num_workers=0,
@@ -203,19 +196,134 @@ def encode_dataset(
         pin_memory=(device.type == "cuda"),
     )
 
+
+@torch.inference_mode()
+def encode_full(
+    model: models.MoLeJEPA,
+    hf_ds: hf_datasets.Dataset,  # type: ignore[name-defined]
+    image_field: str,
+    image_transform: Any,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Encode images through the full image encoder (ViT backbone + projection).
+
+    Args:
+        model: MoLeJEPA model whose image encoder to use.
+        hf_ds: HuggingFace dataset split.
+        image_field: Name of the PIL image column.
+        image_transform: Callable that converts a PIL image to a tensor.
+        batch_size: Encoding batch size.
+        device: Inference device.
+
+    Returns:
+        ``(embeddings, labels)`` where ``embeddings`` is shape
+        ``(N, embed_dim)`` on CPU and ``labels`` maps each label column to a
+        long tensor of shape ``(N,)``.
+    """
+    model.eval()
+    loader = _make_loader(hf_ds, image_field, image_transform, batch_size, device)
     all_embs: list[torch.Tensor] = []
-    all_labels: dict[str, list[torch.Tensor]] = {k: [] for k in label_cols}
+    all_labels: dict[str, list[torch.Tensor]] = {}
 
     for imgs, lbls in loader:
-        imgs = imgs.to(device)
-        emb = model.image_encoder(imgs)
+        if not all_labels:
+            all_labels = {k: [] for k in lbls}
+        emb = model.image_encoder(imgs.to(device))
         all_embs.append(emb.cpu())
         for k, v in lbls.items():
             all_labels[k].append(v)
 
-    embeddings = torch.cat(all_embs, dim=0)
-    labels = {k: torch.cat(v, dim=0) for k, v in all_labels.items()}
-    return embeddings, labels
+    return torch.cat(all_embs, dim=0), {k: torch.cat(v) for k, v in all_labels.items()}
+
+
+@torch.inference_mode()
+def encode_backbone(
+    model: models.MoLeJEPA,
+    hf_ds: hf_datasets.Dataset,  # type: ignore[name-defined]
+    image_field: str,
+    image_transform: Any,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Encode images through the ViT backbone only (no projection head).
+
+    Uses the trained ViT weights but skips the projection, so the output is
+    the CLS token in the ViT's native hidden dimension.  Isolates whether the
+    projection head is adding or removing discriminative information.
+
+    Args:
+        model: MoLeJEPA model whose ViT backbone to use.
+        hf_ds: HuggingFace dataset split.
+        image_field: Name of the PIL image column.
+        image_transform: Callable that converts a PIL image to a tensor.
+        batch_size: Encoding batch size.
+        device: Inference device.
+
+    Returns:
+        ``(embeddings, labels)`` where ``embeddings`` is shape
+        ``(N, vit_hidden_dim)`` on CPU.
+    """
+    vit = model.image_encoder.vit
+    vit.eval()
+    loader = _make_loader(hf_ds, image_field, image_transform, batch_size, device)
+    all_embs: list[torch.Tensor] = []
+    all_labels: dict[str, list[torch.Tensor]] = {}
+
+    for imgs, lbls in loader:
+        if not all_labels:
+            all_labels = {k: [] for k in lbls}
+        cls = vit(pixel_values=imgs.to(device)).last_hidden_state[:, 0]
+        all_embs.append(cls.cpu())
+        for k, v in lbls.items():
+            all_labels[k].append(v)
+
+    return torch.cat(all_embs, dim=0), {k: torch.cat(v) for k, v in all_labels.items()}
+
+
+@torch.inference_mode()
+def encode_baseline(
+    model_name: str,
+    hf_ds: hf_datasets.Dataset,  # type: ignore[name-defined]
+    image_field: str,
+    image_transform: Any,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Encode images with a vanilla ViT loaded fresh from HuggingFace.
+
+    No training on our data.  This is the quality ceiling for the ViT's native
+    representations — scores lower than this indicate our training degraded the
+    ViT's discriminative features.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g.
+            ``"WinKawaks/vit-small-patch16-224"``).
+        hf_ds: HuggingFace dataset split.
+        image_field: Name of the PIL image column.
+        image_transform: Callable that converts a PIL image to a tensor.
+        batch_size: Encoding batch size.
+        device: Inference device.
+
+    Returns:
+        ``(embeddings, labels)`` where ``embeddings`` is shape
+        ``(N, vit_hidden_dim)`` on CPU.
+    """
+    vit = transformers.AutoModel.from_pretrained(model_name).to(device)
+    vit.eval()
+    loader = _make_loader(hf_ds, image_field, image_transform, batch_size, device)
+    all_embs: list[torch.Tensor] = []
+    all_labels: dict[str, list[torch.Tensor]] = {}
+
+    for imgs, lbls in loader:
+        if not all_labels:
+            all_labels = {k: [] for k in lbls}
+        cls = vit(pixel_values=imgs.to(device)).last_hidden_state[:, 0]
+        all_embs.append(cls.cpu())
+        for k, v in lbls.items():
+            all_labels[k].append(v)
+
+    return torch.cat(all_embs, dim=0), {k: torch.cat(v) for k, v in all_labels.items()}
 
 
 # ── linear probe ──────────────────────────────────────────────────────────────
@@ -301,21 +409,23 @@ def evaluate_probe(
 
 def _fmt_row(
     name: str,
+    encoder: str,
     dataset: str,
     scores: dict[str, float],
 ) -> str:
     parts = "  ".join(f"{k}={v:.3f}" for k, v in scores.items())
-    return f"  {name:<40s}  {dataset}  {parts}"
+    return f"  {name:<40s}  {encoder:<10s}  {dataset}  {parts}"
 
 
 def _save_result(
     checkpoint_dir: pathlib.Path,
     name: str,
+    encoder: str,
     dataset: str,
     scores: dict[str, float],
 ) -> None:
     """Append a JSON result line to *checkpoint_dir/linear_probe_results.jsonl*."""
-    record = {"model": name, "dataset": dataset, **scores}
+    record = {"model": name, "encoder": encoder, "dataset": dataset, **scores}
     results_path = checkpoint_dir / _RESULTS_FILE
     with results_path.open("a") as fh:
         fh.write(json.dumps(record) + "\n")
@@ -346,14 +456,17 @@ def main() -> None:
         f"in {time.perf_counter() - t0:.1f}s"
     )
 
-    all_results: list[tuple[str, dict[str, float]]] = []
+    # All results accumulated for the summary table.
+    all_results: list[tuple[str, str, dict[str, float]]] = []
+
+    # Baseline cache: load fresh ViT once per unique model name.
+    baseline_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
     for name in args.config:
         print(f"\n{'=' * 70}")
         print(f"Model: {name}")
         print(f"{'=' * 70}")
 
-        # ── load model ────────────────────────────────────────────────────────
         print("Loading model …")
         t0 = time.perf_counter()
         model = model_io.load_model(
@@ -365,50 +478,41 @@ def main() -> None:
         model.eval()
         print(f"  Loaded in {time.perf_counter() - t0:.1f}s")
 
-        # Build the image transform matching what was used during training.
         entry = nfs_registry.get_entry(name, args.registry_path)
+        image_model_name = entry.config.image_encoder_model_name
         data_cfg = config_module.DataConfig(
-            image_processor_model_name=entry.config.image_encoder_model_name,
+            image_processor_model_name=image_model_name,
         )
         image_transform = data_transforms.build_image_transform(
             data_cfg.image_processor_model_name, train=False
         )
 
-        # ── encode ────────────────────────────────────────────────────────────
-        print("Encoding train split …")
+        # ── full encoder (backbone + projection) ─────────────────────────────
+        print("Encoding with full encoder (backbone + projection) …")
         t0 = time.perf_counter()
-        train_embs, train_labels = encode_dataset(
+        train_embs_full, train_labels = encode_full(
             model,
-            train_hf,  # type: ignore[arg-type]
-            ds_cfg["image_field"],
+            train_hf,
+            ds_cfg["image_field"],  # type: ignore[arg-type]
             image_transform,
             args.batch_size,
             device,
         )
-        print(f"  {train_embs.shape} in {time.perf_counter() - t0:.1f}s")
-
-        print("Encoding test split …")
-        t0 = time.perf_counter()
-        test_embs, test_labels = encode_dataset(
+        test_embs_full, test_labels = encode_full(
             model,
-            test_hf,  # type: ignore[arg-type]
-            ds_cfg["image_field"],
+            test_hf,
+            ds_cfg["image_field"],  # type: ignore[arg-type]
             image_transform,
             args.batch_size,
             device,
         )
-        print(f"  {test_embs.shape} in {time.perf_counter() - t0:.1f}s")
+        print(f"  {train_embs_full.shape}  in {time.perf_counter() - t0:.1f}s")
 
-        # ── linear probe per label field ──────────────────────────────────────
-        scores: dict[str, float] = {}
+        scores_full: dict[str, float] = {}
         for label_field, n_classes in ds_cfg["label_fields"].items():
-            print(
-                f"\nTraining linear probe: {label_field} "
-                f"({n_classes} classes, {args.probe_epochs} epochs) …"
-            )
-            t0 = time.perf_counter()
+            print(f"\n  Probing full  [{label_field}, {n_classes} classes] …")
             head = train_linear_probe(
-                train_embs,
+                train_embs_full,
                 train_labels[label_field],
                 n_classes,
                 epochs=args.probe_epochs,
@@ -416,23 +520,110 @@ def main() -> None:
                 batch_size=args.probe_batch_size,
                 device=device,
             )
-            acc = evaluate_probe(head, test_embs, test_labels[label_field], device)
-            scores[label_field] = acc
-            print(
-                f"  {label_field}: top-1={acc:.3f} in {time.perf_counter() - t0:.1f}s"
+            scores_full[label_field] = evaluate_probe(
+                head, test_embs_full, test_labels[label_field], device
             )
+        print(_fmt_row(name, "full", args.dataset, scores_full))
+        all_results.append((name, "full", scores_full))
+        _save_result(entry.checkpoint_dir, name, "full", args.dataset, scores_full)
 
-        all_results.append((name, scores))
-        print(_fmt_row(name, args.dataset, scores))
-        _save_result(entry.checkpoint_dir, name, args.dataset, scores)
+        # ── backbone only (no projection) ────────────────────────────────────
+        print("\nEncoding with backbone only (no projection) …")
+        t0 = time.perf_counter()
+        train_embs_bb, _ = encode_backbone(
+            model,
+            train_hf,
+            ds_cfg["image_field"],  # type: ignore[arg-type]
+            image_transform,
+            args.batch_size,
+            device,
+        )
+        test_embs_bb, _ = encode_backbone(
+            model,
+            test_hf,
+            ds_cfg["image_field"],  # type: ignore[arg-type]
+            image_transform,
+            args.batch_size,
+            device,
+        )
+        print(f"  {train_embs_bb.shape}  in {time.perf_counter() - t0:.1f}s")
+
+        scores_bb: dict[str, float] = {}
+        for label_field, n_classes in ds_cfg["label_fields"].items():
+            print(f"\n  Probing backbone  [{label_field}, {n_classes} classes] …")
+            head = train_linear_probe(
+                train_embs_bb,
+                train_labels[label_field],
+                n_classes,
+                epochs=args.probe_epochs,
+                lr=args.probe_lr,
+                batch_size=args.probe_batch_size,
+                device=device,
+            )
+            scores_bb[label_field] = evaluate_probe(
+                head, test_embs_bb, test_labels[label_field], device
+            )
+        print(_fmt_row(name, "backbone", args.dataset, scores_bb))
+        all_results.append((name, "backbone", scores_bb))
+        _save_result(entry.checkpoint_dir, name, "backbone", args.dataset, scores_bb)
+
+        # ── vanilla baseline (once per unique image model name) ───────────────
+        if image_model_name not in baseline_cache:
+            print(f"\nEncoding with vanilla {image_model_name} (baseline) …")
+            t0 = time.perf_counter()
+            train_embs_base, _ = encode_baseline(
+                image_model_name,
+                train_hf,
+                ds_cfg["image_field"],  # type: ignore[arg-type]
+                image_transform,
+                args.batch_size,
+                device,
+            )
+            test_embs_base, _ = encode_baseline(
+                image_model_name,
+                test_hf,
+                ds_cfg["image_field"],  # type: ignore[arg-type]
+                image_transform,
+                args.batch_size,
+                device,
+            )
+            baseline_cache[image_model_name] = (train_embs_base, test_embs_base)
+            print(f"  {train_embs_base.shape}  in {time.perf_counter() - t0:.1f}s")
+        else:
+            print(f"\nBaseline ({image_model_name}): cached")
+            train_embs_base, test_embs_base = baseline_cache[image_model_name]
+
+        scores_base: dict[str, float] = {}
+        for label_field, n_classes in ds_cfg["label_fields"].items():
+            print(f"\n  Probing baseline  [{label_field}, {n_classes} classes] …")
+            head = train_linear_probe(
+                train_embs_base,
+                train_labels[label_field],
+                n_classes,
+                epochs=args.probe_epochs,
+                lr=args.probe_lr,
+                batch_size=args.probe_batch_size,
+                device=device,
+            )
+            scores_base[label_field] = evaluate_probe(
+                head, test_embs_base, test_labels[label_field], device
+            )
+        print(_fmt_row("", "baseline", args.dataset, scores_base))
+        all_results.append((name, "baseline", scores_base))
+        _save_result(entry.checkpoint_dir, name, "baseline", args.dataset, scores_base)
 
     # ── summary ───────────────────────────────────────────────────────────────
     if len(all_results) > 1:
         print(f"\n{'=' * 70}")
         print("Summary")
         print(f"{'=' * 70}")
-        for name, scores in all_results:
-            print(_fmt_row(name, args.dataset, scores))
+        prev_model = ""
+        for model_name, encoder, scores in all_results:
+            if model_name != prev_model:
+                print()
+                prev_model = model_name
+            label = model_name if encoder == "full" else ""
+            print(_fmt_row(label, encoder, args.dataset, scores))
 
     print("\nDone.")
 
