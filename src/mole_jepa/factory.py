@@ -16,6 +16,16 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
     Returns:
         A ``(model, loss)`` tuple ready for training.
     """
+    reverse_predictor = (
+        models.Predictor(
+            embed_dim=config.embed_dim,
+            hidden_dim=config.predictor_hidden_dim,
+            n_layers=config.predictor_n_layers,
+        )
+        if config.reverse_predictor
+        else None
+    )
+
     model = models.MoLeJEPA(
         image_encoder=models.ImageEncoder(
             model_name=config.image_encoder_model_name,
@@ -32,6 +42,7 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
             hidden_dim=config.predictor_hidden_dim,
             n_layers=config.predictor_n_layers,
         ),
+        reverse_predictor=reverse_predictor,
     )
 
     if config.freeze_image_encoder:

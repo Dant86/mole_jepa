@@ -171,14 +171,14 @@ def _run_worker(args: argparse.Namespace) -> None:
 
     from mole_jepa import config as config_module
     from mole_jepa import data as data_module
-    from mole_jepa import factory, nfs_registry
+    from mole_jepa import factory, registry
 
     batch_size = args.w_batch_size
     num_workers = args.w_num_workers
     prefetch = args.w_prefetch
 
     # ── resolve model config from registry ────────────────────────────────────
-    entry = nfs_registry.get_entry(args.w_config, args.w_registry_path)
+    entry = registry.get_entry(args.w_config, args.w_registry_path)
     model_config = entry.config
 
     data_cfg = config_module.DataConfig(

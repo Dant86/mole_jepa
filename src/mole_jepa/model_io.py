@@ -89,9 +89,9 @@ def _checkpoint_dir_for(
     registry_dir: str | pathlib.Path | None,
 ) -> pathlib.Path:
     """Look up *name* in the registry and return its checkpoint directory."""
-    from mole_jepa import nfs_registry
+    from mole_jepa import registry
 
-    entry = nfs_registry.get_entry(name, registry_dir)
+    entry = registry.get_entry(name, registry_dir)
     return entry.checkpoint_dir
 
 
@@ -185,9 +185,9 @@ def save_model(
         name: Registered model name (looked up in the NFS registry).
         registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
     """
-    from mole_jepa import nfs_registry
+    from mole_jepa import registry
 
-    entry = nfs_registry.get_entry(name, registry_dir)
+    entry = registry.get_entry(name, registry_dir)
     _save_model_to(model, entry.config, entry.checkpoint_dir)
 
 
@@ -216,9 +216,9 @@ def load_model(
     Raises:
         FileNotFoundError: If no ``model.pt`` exists for *name*.
     """
-    from mole_jepa import nfs_registry
+    from mole_jepa import registry
 
-    entry = nfs_registry.get_entry(name, registry_dir)
+    entry = registry.get_entry(name, registry_dir)
     model, _ = factory.build(entry.config)
     _load_model_weights_from(model, entry.checkpoint_dir, map_location=map_location)
     return model

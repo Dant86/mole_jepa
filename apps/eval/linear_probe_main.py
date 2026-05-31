@@ -64,7 +64,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import transformers  # noqa: E402
 
 from mole_jepa import config as config_module  # noqa: E402
-from mole_jepa import model_io, models, nfs_registry  # noqa: E402
+from mole_jepa import model_io, models, registry  # noqa: E402
 from mole_jepa.data import transforms as data_transforms  # noqa: E402
 
 _RESULTS_FILE = "linear_probe_results.jsonl"
@@ -478,7 +478,7 @@ def main() -> None:
         model.eval()
         print(f"  Loaded in {time.perf_counter() - t0:.1f}s")
 
-        entry = nfs_registry.get_entry(name, args.registry_path)
+        entry = registry.get_entry(name, args.registry_path)
         image_model_name = entry.config.image_encoder_model_name
         data_cfg = config_module.DataConfig(
             image_processor_model_name=image_model_name,

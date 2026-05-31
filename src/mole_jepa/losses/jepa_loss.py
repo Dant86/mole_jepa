@@ -15,16 +15,20 @@ class JEPALossOutput:
 
     Attributes:
         loss: Total loss:
-            ``lam_image * loss_reg_image + lam_text * loss_reg_text + loss_mse``.
-        loss_mse: MSE between ``z_hat_t`` and ``z_t``.
+            ``lam_image * loss_reg_image + lam_text * loss_reg_text
+            + loss_mse + loss_mse_reverse``.
+        loss_mse: MSE between ``z_hat_t`` and ``z_t`` (forward direction).
         loss_reg_image: SIGReg penalty on the image embeddings ``z_v``.
         loss_reg_text: SIGReg penalty on the text embeddings ``z_t``.
+        loss_mse_reverse: MSE between ``z_hat_v`` and ``z_v`` (reverse
+            direction). Zero when no reverse predictor is active.
     """
 
     loss: torch.Tensor
     loss_mse: torch.Tensor
     loss_reg_image: torch.Tensor
     loss_reg_text: torch.Tensor
+    loss_mse_reverse: torch.Tensor
 
 
 class JEPALoss(nn.Module):
@@ -80,24 +84,36 @@ class JEPALoss(nn.Module):
 
         Args:
             output: Output from a :class:`~mole_jepa.models.MoLeJEPA` forward
-                pass, containing ``z_v``, ``z_hat_t``, and ``z_t``.
+                pass, containing ``z_v``, ``z_hat_t``, ``z_t``, and
+                optionally ``z_hat_v``.
 
         Returns:
             JEPALossOutput with the total loss and its components.
             ``loss_reg_image`` is zero when ``regularize_z_i=False``;
-            ``loss_reg_text`` is zero when ``regularize_z_t=False``.
+            ``loss_reg_text`` is zero when ``regularize_z_t=False``;
+            ``loss_mse_reverse`` is zero when no reverse predictor produced
+            ``z_hat_v``.
         """
-        loss_mse = functional.mse_loss(output.z_hat_t, output.z_t)
         zero = torch.zeros([], device=output.z_v.device, dtype=output.z_v.dtype)
+        loss_mse = functional.mse_loss(output.z_hat_t, output.z_t)
+        loss_mse_reverse = (
+            functional.mse_loss(output.z_hat_v, output.z_v)
+            if output.z_hat_v is not None
+            else zero
+        )
         loss_reg_image = self.regularizer(output.z_v) if self.regularize_z_i else zero
         loss_reg_text = self.regularizer(output.z_t) if self.regularize_z_t else zero
 
         loss = (
-            self.lam_image * loss_reg_image + self.lam_text * loss_reg_text + loss_mse
+            self.lam_image * loss_reg_image
+            + self.lam_text * loss_reg_text
+            + loss_mse
+            + loss_mse_reverse
         )
         return JEPALossOutput(
             loss=loss,
             loss_mse=loss_mse,
             loss_reg_image=loss_reg_image,
             loss_reg_text=loss_reg_text,
+            loss_mse_reverse=loss_mse_reverse,
         )

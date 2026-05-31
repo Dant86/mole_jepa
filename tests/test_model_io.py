@@ -9,7 +9,8 @@ import torch
 
 from mole_jepa import config as config_module
 from mole_jepa import model_io as mio
-from mole_jepa import models, nfs_registry
+from mole_jepa import models
+from mole_jepa import registry as reg_module
 
 _HIDDEN = 32
 _EMBED = 16
@@ -54,7 +55,7 @@ def registry(
     reg_dir = tmp_path / "registry"
     ckpt_base = tmp_path / "checkpoints"
     name = "test_model"
-    nfs_registry.register(
+    reg_module.register(
         name,
         config=small_config,
         checkpoint_dir=ckpt_base,
@@ -96,7 +97,7 @@ class TestSaveLoadModel:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        ckpt = reg_module.get_checkpoint_dir(name, reg_dir)
         assert (ckpt / "model.pt").exists()
         assert (ckpt / "config.json").exists()
 
@@ -108,7 +109,7 @@ class TestSaveLoadModel:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        ckpt = reg_module.get_checkpoint_dir(name, reg_dir)
         assert not (ckpt / "model.pt.tmp").exists()
 
     def test_save_does_not_overwrite_existing_config(
@@ -133,7 +134,7 @@ class TestSaveLoadModel:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        ckpt = reg_module.get_checkpoint_dir(name, reg_dir)
         contents = torch.load(ckpt / "model.pt", weights_only=True)
         assert isinstance(contents, dict)
         assert all(isinstance(v, torch.Tensor) for v in contents.values())
@@ -162,7 +163,7 @@ class TestSaveLoadModel:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        cfg = nfs_registry.get_config(name, reg_dir)
+        cfg = reg_module.get_config(name, reg_dir)
         target, _ = factory.build(cfg)
         mio.load_model_weights(target, name, registry_dir=reg_dir)
         for p_orig, p_loaded in zip(model.parameters(), target.parameters()):
@@ -288,7 +289,7 @@ class TestTrainState:
         _, optimizer = model_and_optimizer
         reg_dir, name = registry
         mio.save_train_state(optimizer, epoch=0, name=name, registry_dir=reg_dir)
-        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        ckpt = reg_module.get_checkpoint_dir(name, reg_dir)
         assert not (ckpt / "train_state.pt.tmp").exists()
 
     def test_cleanup_removes_train_state(
@@ -330,11 +331,15 @@ class TestListModels:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        ckpt_root = nfs_registry.get_checkpoint_dir(name, reg_dir).parent
+        ckpt_root = reg_module.get_checkpoint_dir(name, reg_dir).parent
         results = mio.list_models(ckpt_root)
         assert len(results) == 1
         assert results[0].config == small_config
-        assert results[0].config_hash == small_config.serialize()
+        # config_hash is the checkpoint directory name — a 64-char SHA-256 hex
+        # string derived from both the model name and its config.
+        from mole_jepa.registry import _entry_hash
+
+        assert results[0].config_hash == _entry_hash(name, small_config)
 
     def test_skips_plain_files_in_root(
         self,
@@ -345,7 +350,7 @@ class TestListModels:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        ckpt_root = nfs_registry.get_checkpoint_dir(name, reg_dir).parent
+        ckpt_root = reg_module.get_checkpoint_dir(name, reg_dir).parent
         (ckpt_root / "stray.txt").write_text("garbage")
         results = mio.list_models(ckpt_root)
         assert len(results) == 1
@@ -372,7 +377,7 @@ class TestListModels:
         model, _ = model_and_optimizer
         reg_dir, name = registry
         mio.save_model(model, name, registry_dir=reg_dir)
-        ckpt = nfs_registry.get_checkpoint_dir(name, reg_dir)
+        ckpt = reg_module.get_checkpoint_dir(name, reg_dir)
         (ckpt / "config.json").unlink()
         ckpt_root = ckpt.parent
         assert mio.list_models(ckpt_root) == []
@@ -390,7 +395,7 @@ class TestListModels:
             cfg = config_module.ModelConfig(embed_dim=embed_dim, predictor_n_layers=2)
             model, _ = factory.build(cfg)
             name = f"model_{embed_dim}"
-            nfs_registry.register(
+            reg_module.register(
                 name, config=cfg, checkpoint_dir=ckpt_root, registry_dir=reg_dir
             )
             mio.save_model(model, name, registry_dir=reg_dir)
@@ -422,7 +427,7 @@ class TestListModels:
         for i, cfg in enumerate(cfgs):
             model, _ = factory.build(cfg)
             name = f"model_{i}"
-            nfs_registry.register(
+            reg_module.register(
                 name, config=cfg, checkpoint_dir=ckpt_root, registry_dir=reg_dir
             )
             mio.save_model(model, name, registry_dir=reg_dir)
@@ -451,7 +456,7 @@ class TestListModels:
             cfg = config_module.ModelConfig(embed_dim=embed_dim, predictor_n_layers=2)
             model, _ = factory.build(cfg)
             name = f"model_{embed_dim}"
-            nfs_registry.register(
+            reg_module.register(
                 name, config=cfg, checkpoint_dir=ckpt_root, registry_dir=reg_dir
             )
             mio.save_model(model, name, registry_dir=reg_dir)

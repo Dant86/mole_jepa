@@ -20,7 +20,7 @@ import torch.utils.data
 
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
-from mole_jepa import factory, losses, model_io, models, nfs_registry
+from mole_jepa import factory, losses, model_io, models, registry
 
 _STATS_FILE = "stats.jsonl"
 
@@ -282,7 +282,7 @@ def resolve_entry(
             registry path is set in the CLI args or the environment.
     """
     try:
-        entry = nfs_registry.get_entry(args.config, args.registry_path or None)
+        entry = registry.get_entry(args.config, args.registry_path or None)
     except (KeyError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -558,7 +558,7 @@ def _forward_loss(
         loss = loss_fn(output.z_v, output.z_t)
         return loss, {"loss": loss.item()}
     jepa_out = loss_fn(output)
-    return jepa_out.loss, {
+    components: dict[str, float] = {
         "loss": jepa_out.loss.item(),
         "loss_mse": jepa_out.loss_mse.item(),
         "loss_reg_image": jepa_out.loss_reg_image.item(),
@@ -567,6 +567,10 @@ def _forward_loss(
         "z_t_norm": output.z_t.norm(dim=-1).mean().item(),
         "z_hat_t_norm": output.z_hat_t.norm(dim=-1).mean().item(),
     }
+    if output.z_hat_v is not None:
+        components["loss_mse_reverse"] = jepa_out.loss_mse_reverse.item()
+        components["z_hat_v_norm"] = output.z_hat_v.norm(dim=-1).mean().item()
+    return jepa_out.loss, components
 
 
 def run_epoch(
@@ -812,6 +816,15 @@ def main() -> None:
             "lr_multiplier": args.predictor_lr_multiplier,
         }
     )
+
+    if model.reverse_predictor is not None:
+        param_groups.append(
+            {
+                "params": list(model.reverse_predictor.parameters()),
+                "lr": args.lr * args.predictor_lr_multiplier,
+                "lr_multiplier": args.predictor_lr_multiplier,
+            }
+        )
 
     for pg in param_groups:
         print(

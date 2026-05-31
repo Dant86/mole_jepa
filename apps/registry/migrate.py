@@ -26,7 +26,7 @@ Create ``apps/registry/migrations/m00N_<description>.py`` with::
         data["schema_version"] = PRODUCES_VERSION
         return data
 
-Then bump CURRENT_SCHEMA_VERSION in src/mole_jepa/nfs_registry.py to N
+Then bump CURRENT_SCHEMA_VERSION in src/mole_jepa/registry.py to N
 and run this script on the cluster.
 """
 
@@ -42,7 +42,7 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-import mole_jepa.nfs_registry as nfs_registry  # noqa: E402
+import mole_jepa.registry as registry  # noqa: E402
 
 
 def _discover_migrations(
@@ -86,7 +86,7 @@ def run_pending(
 
     # Read the current version outside the write lock (safe for display/filtering;
     # apply_migration re-reads inside the lock so there is no TOCTOU on the write).
-    current = nfs_registry.schema_version(registry_dir)
+    current = registry.schema_version(registry_dir)
     pending = [(v, m) for v, m in all_migrations if v > current]
 
     if not pending:
@@ -109,7 +109,7 @@ def run_pending(
                 data = mod.up(data)
             return data
 
-        nfs_registry.apply_migration(registry_dir, _up)
+        registry.apply_migration(registry_dir, _up)
         print(f"Done. schema_version: {current} → {pending[-1][0]}")
     else:
         print("Dry run complete — no changes written.")

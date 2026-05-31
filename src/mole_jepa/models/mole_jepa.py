@@ -17,11 +17,14 @@ class MoLeJEPAOutput:
         z_v: Image embeddings ``f(x)`` of shape ``(B, d)``.
         z_hat_t: Predicted text embeddings ``g(f(x))`` of shape ``(B, d)``.
         z_t: Text embeddings ``h(y)`` of shape ``(B, d)``.
+        z_hat_v: Predicted image embeddings ``gφ(h(y))`` of shape ``(B, d)``,
+            or ``None`` when no reverse predictor is configured.
     """
 
     z_v: torch.Tensor
     z_hat_t: torch.Tensor
     z_t: torch.Tensor
+    z_hat_v: torch.Tensor | None = None
 
 
 class MoLeJEPA(nn.Module):
@@ -36,7 +39,11 @@ class MoLeJEPA(nn.Module):
     Args:
         image_encoder: Encoder `f` mapping images to `z_v ∈ ℝ^d`.
         text_encoder: Encoder `h` mapping text to `z_t ∈ ℝ^d`.
-        predictor: Module `g` mapping `z_v` to `ẑ_t`.
+        predictor: Forward predictor `g` mapping `z_v` to `ẑ_t`.
+        reverse_predictor: Optional reverse predictor `gφ` mapping `z_t` to
+            `ẑ_v`. When provided, a symmetric MSE term
+            ``MSE(gφ(z_t), z_v)`` is added to the JEPA loss, addressing the
+            i2t/t2i asymmetry that arises from a single-direction predictor.
     """
 
     def __init__(
@@ -44,11 +51,13 @@ class MoLeJEPA(nn.Module):
         image_encoder: encoders.ImageEncoder,
         text_encoder: encoders.TextEncoder,
         predictor: predictor_module.Predictor,
+        reverse_predictor: predictor_module.Predictor | None = None,
     ) -> None:
         super().__init__()
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
         self.predictor = predictor
+        self.reverse_predictor = reverse_predictor
 
     def forward(
         self,
@@ -64,10 +73,12 @@ class MoLeJEPA(nn.Module):
             attention_mask: Padding mask of shape `(B, T)`.
 
         Returns:
-            MoLeJEPAOutput containing ``z_v``, ``z_hat_t``, and ``z_t``.
+            MoLeJEPAOutput containing ``z_v``, ``z_hat_t``, ``z_t``, and
+            optionally ``z_hat_v`` when a reverse predictor is configured.
         """
         z_v = self.image_encoder(pixel_values)  # (B, d)
         z_t = self.text_encoder(input_ids, attention_mask)  # (B, d)
         z_hat_t = self.predictor(z_v)  # (B, d)
+        z_hat_v = self.reverse_predictor(z_t) if self.reverse_predictor else None
 
-        return MoLeJEPAOutput(z_v=z_v, z_hat_t=z_hat_t, z_t=z_t)
+        return MoLeJEPAOutput(z_v=z_v, z_hat_t=z_hat_t, z_t=z_t, z_hat_v=z_hat_v)

@@ -1,6 +1,6 @@
 r"""CLI for registering, listing, and deregistering models in the NFS registry.
 
-Wraps :func:`mole_jepa.nfs_registry.register` so you can manage the registry
+Wraps :func:`mole_jepa.registry.register` so you can manage the registry
 from the cluster shell without writing a Python script.
 
 Usage examples::
@@ -51,12 +51,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from mole_jepa import config as config_module  # noqa: E402
-from mole_jepa import nfs_registry  # noqa: E402
+from mole_jepa import registry  # noqa: E402
 
 
 def _cmd_list(registry_dir: str) -> None:
     """Print all registered models."""
-    entries = nfs_registry.list_entries(registry_dir)
+    entries = registry.list_entries(registry_dir)
     if not entries:
         print("Registry is empty.")
         return
@@ -84,7 +84,7 @@ def _cmd_register(args: argparse.Namespace) -> None:
         raise SystemExit("Provide either --from-entry or --config-json.")
 
     if args.from_entry:
-        source = nfs_registry.get_entry(args.from_entry, args.registry_path)
+        source = registry.get_entry(args.from_entry, args.registry_path)
         model_config = source.config
         if args.override_json:
             try:
@@ -107,7 +107,7 @@ def _cmd_register(args: argparse.Namespace) -> None:
         except TypeError as exc:
             raise SystemExit(f"Invalid ModelConfig fields: {exc}") from exc
 
-    entry = nfs_registry.register(
+    entry = registry.register(
         args.name,
         model_config,
         checkpoint_dir=args.checkpoint_dir,  # None → falls back to $CHECKPOINT_DIR
@@ -122,7 +122,7 @@ def _cmd_register(args: argparse.Namespace) -> None:
 
 def _cmd_deregister(name: str, registry_dir: str | None) -> None:
     """Remove an entry from the registry."""
-    nfs_registry.deregister(name, registry_dir)
+    registry.deregister(name, registry_dir)
     print(f"Removed {name!r} from registry (checkpoint files untouched).")
 
 

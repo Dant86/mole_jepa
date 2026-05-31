@@ -1,13 +1,13 @@
 """Migration 001 — initial schema.
 
 This is a no-op migration that establishes schema_version = 1.
-All registry files created by nfs_registry.register() already carry
+All registry files created by registry.register() already carry
 schema_version = 1, so this migration only fires on files that were
 written by hand or by a pre-versioning tool.
 
 To add a new field to ModelConfig:
   1. Add the field with a default to src/mole_jepa/config.py.
-  2. Bump CURRENT_SCHEMA_VERSION in src/mole_jepa/nfs_registry.py.
+  2. Bump CURRENT_SCHEMA_VERSION in src/mole_jepa/registry.py.
   3. Write apps/registry/migrations/m00N_<description>.py with:
 
          DESCRIPTION = "Add <field> (default <value>)"

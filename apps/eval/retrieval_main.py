@@ -38,7 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from mole_jepa import config as config_module  # noqa: E402
-from mole_jepa import model_io, models, nfs_registry  # noqa: E402
+from mole_jepa import model_io, models, registry  # noqa: E402
 from mole_jepa.data.coco import COCODataset  # noqa: E402
 from mole_jepa.evaluation.retrieval import (  # noqa: E402
     RetrievalResult,
@@ -299,7 +299,7 @@ def main() -> None:
         # The image processor and tokenizer share the same HF identifier as the
         # respective encoder backbone, so we can derive DataConfig from
         # ModelConfig without storing it separately in the registry.
-        entry = nfs_registry.get_entry(name, args.registry_path)
+        entry = registry.get_entry(name, args.registry_path)
         data_cfg = config_module.DataConfig(
             image_processor_model_name=entry.config.image_encoder_model_name,
             tokenizer_model_name=entry.config.text_encoder_model_name,

@@ -49,6 +49,12 @@ class ModelConfig:
             PyTorch's scaled_dot_product_attention (free, usually faster).
             ``"flash_attention_2"`` requires the ``flash-attn`` package and
             gives the largest memory and throughput gains.
+        reverse_predictor: If ``True``, also train a second predictor
+            ``gφ: z_t → ẑ_v`` (text → image direction) with its own MSE
+            term.  Addresses the i2t/t2i asymmetry that arises because the
+            default single-direction predictor ``fθ: z_v → ẑ_t`` gives no
+            gradient signal in the reverse direction.  Defaults to ``False``
+            so existing registry entries are unaffected.
     """
 
     embed_dim: int = 256
@@ -67,6 +73,7 @@ class ModelConfig:
     info_nce_temperature: float = 0.07
     freeze_image_encoder: bool = True
     attn_implementation: str = "sdpa"
+    reverse_predictor: bool = False
 
     def serialize(self) -> str:
         """Serialize this config to a stable SHA-256 hex string.
