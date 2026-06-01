@@ -37,6 +37,7 @@ export PYTHONUNBUFFERED=1
 # Prevents the HuggingFace tokenizers Rust library from spawning threads
 # before DataLoader forks workers, which can cause deadlocks or silent crashes.
 export TOKENIZERS_PARALLELISM=false
+export WANDB_API_KEY="${WANDB_API_KEY:-}"
 # Reduces CUDA allocator fragmentation at large batch sizes.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 if ! command -v uv &> /dev/null; then
