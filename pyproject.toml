@@ -23,6 +23,7 @@ dependencies = [
     "transformers",
     "jupyterlab",
     "wandb",
+    "supabase>=2.0",
 ]
 
 [dependency-groups]
