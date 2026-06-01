@@ -22,6 +22,7 @@ dependencies = [
     "scipy",
     "transformers",
     "jupyterlab",
+    "wandb",
 ]
 
 [dependency-groups]
