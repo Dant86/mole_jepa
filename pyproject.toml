@@ -10,7 +10,7 @@ name = "mole-jepa"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "dotenv",
     "torch",
@@ -66,7 +66,7 @@ omit = []
 
 [tool.ruff]
 line-length = 88
-target-version = "py314"
+target-version = "py313"
 exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
@@ -97,7 +97,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pyright]
-pythonVersion = "3.14"
+pythonVersion = "3.13"
 typeCheckingMode = "standard"
 reportMissingImports = true
 reportMissingTypeStubs = false
