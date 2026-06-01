@@ -17,6 +17,7 @@ from typing import Any, cast
 import datasets as hf_datasets
 import torch
 import torch.utils.data
+import wandb
 
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
@@ -260,6 +261,26 @@ def parse_args() -> argparse.Namespace:
         "--caption-field",
         default=dcfg.caption_field,
         help="Dataset field name containing the caption (default: 'txt').",
+    )
+
+    # ── W&B ───────────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--wandb",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Log metrics to Weights & Biases (default: enabled). "
+            "Pass --no-wandb to disable, e.g. for smoke-tests."
+        ),
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Display name for the W&B run.  Defaults to --config so each "
+            "registry entry maps to a consistently named run."
+        ),
     )
 
     return parser.parse_args()
@@ -660,6 +681,15 @@ def run_epoch(
                     f"[{ts}]  epoch {epoch:>3}  step {batch_idx + 1:>6}"
                     f"  {parts}  lr {current_lr:.2e}  samples/s {samples_per_sec:,.0f}"
                 )
+                if wandb.run is not None:
+                    wandb.log(
+                        {f"step/{k}": v for k, v in components.items()}
+                        | {
+                            "step/lr": current_lr,
+                            "step/samples_per_sec": samples_per_sec,
+                            "step/epoch": epoch,
+                        }
+                    )
 
     elapsed = time.monotonic() - epoch_t0
     elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
@@ -875,6 +905,37 @@ def main() -> None:
         args.config, registry_dir=args.registry_path or None
     )
 
+    # ── W&B run ───────────────────────────────────────────────────────────────
+    # Initialise after resume detection so we can set resume="allow" for
+    # preempted jobs.  The run ID is the model name so SLURM requeueing
+    # continues the same W&B run rather than creating a new one.
+    if args.wandb:
+        wandb.init(
+            entity="vedantdpathak-university-of-chicago",
+            project="mole-jepa",
+            name=args.wandb_run_name or args.config,
+            id=args.config,
+            resume="allow",
+            config={
+                **dataclasses.asdict(model_config),
+                "lr": args.lr,
+                "lr_eta_min": args.lr_eta_min,
+                "lr_warmup_steps": args.lr_warmup_steps,
+                "text_encoder_lr_multiplier": args.text_encoder_lr_multiplier,
+                "image_encoder_lr_multiplier": args.image_encoder_lr_multiplier,
+                "predictor_lr_multiplier": args.predictor_lr_multiplier,
+                "weight_decay": args.weight_decay,
+                "grad_clip": args.grad_clip,
+                "batch_size": args.batch_size,
+                "num_epochs": args.num_epochs,
+                "max_train_samples": args.max_train_samples,
+                "dataset": args.hf_dataset_name,
+                "resuming": resuming,
+            },
+            dir=str(checkpoint_dir),
+            tags=[args.config],
+        )
+
     start_epoch = 0
     if resuming:
         model_io.load_model_weights(
@@ -937,6 +998,12 @@ def main() -> None:
         for dl in (loader, val_loader):
             if getattr(dl, "_iterator", None) is not None:
                 dl._iterator = None  # type: ignore[assignment]
+        # Mark the W&B run as preempted so the dashboard shows it as
+        # interrupted rather than crashed.  exit_code=1 (non-zero) signals
+        # that the run didn't complete normally; W&B will keep the run open
+        # so resumption continues it.
+        if wandb.run is not None:
+            wandb.finish(exit_code=1)
         sys.exit(99)
 
     signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
@@ -982,6 +1049,14 @@ def main() -> None:
         log_stats(
             checkpoint_dir, epoch, train_stats, train_batches, val_stats, val_batches
         )
+        if wandb.run is not None:
+            epoch_log: dict[str, object] = {
+                f"epoch/train_{k}": v for k, v in train_stats.items()
+            }
+            if val_stats is not None:
+                epoch_log.update({f"epoch/val_{k}": v for k, v in val_stats.items()})
+            epoch_log["epoch"] = epoch
+            wandb.log(epoch_log, step=epoch)
         model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
         model_io.save_train_state(
             optimizer,
@@ -996,6 +1071,8 @@ def main() -> None:
     # it is only needed for resumption and is no longer useful.
     model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
     model_io.cleanup_train_state(args.config, registry_dir=args.registry_path or None)
+    if wandb.run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":
