@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
 import sys
 import time
@@ -83,15 +82,6 @@ def parse_args() -> argparse.Namespace:
         required=True,
         metavar="NAME",
         help="One or more registered model names to evaluate.",
-    )
-    parser.add_argument(
-        "--registry-path",
-        default=os.environ.get("REGISTRY_PATH"),
-        metavar="DIR",
-        help=(
-            "Directory containing registry.json. "
-            "Defaults to $REGISTRY_PATH from the environment."
-        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -361,14 +351,13 @@ def main() -> None:
         t0 = time.perf_counter()
         model = model_io.load_model(
             name,
-            registry_dir=args.registry_path,
             map_location=device,
         )
         model.to(device)
         model.eval()
         print(f"  Loaded in {time.perf_counter() - t0:.1f}s")
 
-        entry = registry.get_entry(name, args.registry_path)
+        entry = registry.get_entry(name)
         text_model_name = entry.config.text_encoder_model_name
         tokenize = data_transforms.build_tokenizer(text_model_name, args.max_seq_length)
 

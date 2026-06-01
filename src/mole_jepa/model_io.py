@@ -1,9 +1,7 @@
 """Model persistence and loading for MoLeJEPA.
 
 All public save/load functions accept a **model name** and resolve the
-checkpoint directory from the NFS registry.  Registry and checkpoint
-directories default to the ``$REGISTRY_PATH`` and ``$CHECKPOINT_DIR``
-environment variables (with ``.env`` fallback via :mod:`mole_jepa.env`).
+checkpoint directory from the Supabase registry entry for that name.
 
 Artifacts
 ---------
@@ -84,15 +82,11 @@ def model_dir(
     return pathlib.Path(root) / config.serialize()
 
 
-def _checkpoint_dir_for(
-    name: str,
-    registry_dir: str | pathlib.Path | None,
-) -> pathlib.Path:
+def _checkpoint_dir_for(name: str) -> pathlib.Path:
     """Look up *name* in the registry and return its checkpoint directory."""
     from mole_jepa import registry
 
-    entry = registry.get_entry(name, registry_dir)
-    return entry.checkpoint_dir
+    return registry.get_entry(name).checkpoint_dir
 
 
 def _save_model_to(
@@ -171,30 +165,26 @@ def _load_train_state_from(
 def save_model(
     model: models.MoLeJEPA,
     name: str,
-    *,
-    registry_dir: str | pathlib.Path | None = None,
 ) -> None:
     """Save model weights (and config) to the checkpoint directory for *name*.
 
     Writes ``model.pt`` atomically via a temp-file rename, and ``config.json``
     on the first call (never overwritten on subsequent saves).  The checkpoint
-    directory is resolved from the NFS registry entry for *name*.
+    directory is resolved from the Supabase registry entry for *name*.
 
     Args:
         model: The model whose weights to persist.
-        name: Registered model name (looked up in the NFS registry).
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
+        name: Registered model name.
     """
     from mole_jepa import registry
 
-    entry = registry.get_entry(name, registry_dir)
+    entry = registry.get_entry(name)
     _save_model_to(model, entry.config, entry.checkpoint_dir)
 
 
 def load_model(
     name: str,
     *,
-    registry_dir: str | pathlib.Path | None = None,
     map_location: str | torch.device = "cpu",
 ) -> models.MoLeJEPA:
     """Build a model from its registered config and load its saved weights.
@@ -207,7 +197,6 @@ def load_model(
 
     Args:
         name: Registered model name.
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
         map_location: Device to load tensors onto.  Defaults to ``"cpu"``.
 
     Returns:
@@ -218,7 +207,7 @@ def load_model(
     """
     from mole_jepa import registry
 
-    entry = registry.get_entry(name, registry_dir)
+    entry = registry.get_entry(name)
     model, _ = factory.build(entry.config)
     _load_model_weights_from(model, entry.checkpoint_dir, map_location=map_location)
     return model
@@ -228,7 +217,6 @@ def load_model_weights(
     model: models.MoLeJEPA,
     name: str,
     *,
-    registry_dir: str | pathlib.Path | None = None,
     map_location: str | torch.device = "cpu",
 ) -> None:
     """Load saved weights into an already-constructed model in-place.
@@ -237,31 +225,25 @@ def load_model_weights(
         model: An already-constructed :class:`~mole_jepa.models.MoLeJEPA`
             instance to load weights into.
         name: Registered model name.
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
         map_location: Device to load tensors onto.
 
     Raises:
         FileNotFoundError: If no ``model.pt`` exists for *name*.
     """
-    ckpt = _checkpoint_dir_for(name, registry_dir)
+    ckpt = _checkpoint_dir_for(name)
     _load_model_weights_from(model, ckpt, map_location=map_location)
 
 
-def has_train_state(
-    name: str,
-    *,
-    registry_dir: str | pathlib.Path | None = None,
-) -> bool:
+def has_train_state(name: str) -> bool:
     """Return ``True`` if a resumable train state exists for *name*.
 
     Args:
         name: Registered model name.
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
 
     Returns:
         ``True`` if ``train_state.pt`` is present in the checkpoint directory.
     """
-    ckpt = _checkpoint_dir_for(name, registry_dir)
+    ckpt = _checkpoint_dir_for(name)
     return (ckpt / _TRAIN_STATE_FILE).exists()
 
 
@@ -271,7 +253,6 @@ def save_train_state(
     name: str,
     *,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
-    registry_dir: str | pathlib.Path | None = None,
 ) -> None:
     """Save optimizer state, LR scheduler state, and epoch for training resumption.
 
@@ -284,22 +265,18 @@ def save_train_state(
         name: Registered model name.
         scheduler: Optional LR scheduler whose state to persist alongside the
             optimizer.  Pass ``None`` (default) when no scheduler is used.
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
     """
-    ckpt = _checkpoint_dir_for(name, registry_dir)
+    ckpt = _checkpoint_dir_for(name)
     _save_train_state_to(optimizer, epoch, ckpt, scheduler=scheduler)
 
 
 def load_train_state(
     name: str,
-    *,
-    registry_dir: str | pathlib.Path | None = None,
 ) -> tuple[dict[str, Any], int, dict[str, Any] | None] | None:
     """Load optimizer state, epoch, and optional scheduler state.
 
     Args:
         name: Registered model name.
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
 
     Returns:
         ``(optimizer_state_dict, epoch, scheduler_state_dict)`` if a train
@@ -307,24 +284,19 @@ def load_train_state(
         checkpoint was saved without a scheduler.  Returns ``None`` entirely
         if no train state is present (fresh run).
     """
-    ckpt = _checkpoint_dir_for(name, registry_dir)
+    ckpt = _checkpoint_dir_for(name)
     return _load_train_state_from(ckpt)
 
 
-def cleanup_train_state(
-    name: str,
-    *,
-    registry_dir: str | pathlib.Path | None = None,
-) -> None:
+def cleanup_train_state(name: str) -> None:
     """Remove the ephemeral train state file for *name*.
 
     Safe to call even if no train state exists.
 
     Args:
         name: Registered model name.
-        registry_dir: Registry directory.  Defaults to ``$REGISTRY_PATH``.
     """
-    ckpt = _checkpoint_dir_for(name, registry_dir)
+    ckpt = _checkpoint_dir_for(name)
     (ckpt / _TRAIN_STATE_FILE).unlink(missing_ok=True)
 
 

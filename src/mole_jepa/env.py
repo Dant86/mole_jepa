@@ -1,19 +1,18 @@
 """Environment variable accessors for MoLeJEPA.
 
-Reads ``REGISTRY_PATH`` and ``CHECKPOINT_DIR`` from ``os.environ``.  If a
-variable is not already present, the module attempts to populate it from a
-``.env`` file in the current working directory (or the project root for
-editable installs) before raising.
+Reads ``CHECKPOINT_DIR``, ``SUPABASE_URL``, and ``SUPABASE_ANON_KEY`` from
+``os.environ``.  If a variable is not already present, the module attempts to
+populate it from a ``.env`` file in the current working directory (or the
+project root for editable installs) before raising.
 
 The ``.env`` file is parsed **once** and does **not** override variables that
 are already set — so a value exported in a SLURM script (``source .env``,
-``export REGISTRY_PATH=…``) always takes precedence over the file.
+``export CHECKPOINT_DIR=…``) always takes precedence over the file.
 
 Usage::
 
     from mole_jepa import env
 
-    reg   = env.registry_dir()    # raises RuntimeError if not set
     ckpts = env.checkpoint_dir()  # raises RuntimeError if not set
 """
 
@@ -58,29 +57,6 @@ def _parse_env_file(path: pathlib.Path) -> None:
 
 
 # ── public accessors ──────────────────────────────────────────────────────────
-
-
-def registry_dir() -> str:
-    """Return the NFS registry directory from ``$REGISTRY_PATH``.
-
-    Loads ``.env`` from the current working directory if the variable is not
-    already set.
-
-    Returns:
-        The value of ``$REGISTRY_PATH``.
-
-    Raises:
-        RuntimeError: If ``REGISTRY_PATH`` is not set in the environment or
-            in a ``.env`` file.
-    """
-    _load_dotenv()
-    try:
-        return os.environ["REGISTRY_PATH"]
-    except KeyError:
-        raise RuntimeError(
-            "REGISTRY_PATH is not set. "
-            "Export it in your shell, or add REGISTRY_PATH=<path> to your .env file."
-        ) from None
 
 
 def checkpoint_dir() -> str:

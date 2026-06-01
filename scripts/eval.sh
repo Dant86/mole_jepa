@@ -59,6 +59,5 @@ uv sync
 #       --config vit_small_miniml_jepa_frozen vit_small_miniml_jepa_unfrozen \
 #       --coco-split test
 uv run python apps/eval/retrieval_main.py \
-    --registry-path "${REGISTRY_PATH}" \
     --flat \
     "$@"

@@ -52,5 +52,4 @@ uv sync
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
 uv run python apps/eval/linear_probe_main.py \
-    --registry-path "${REGISTRY_PATH}" \
     "$@"

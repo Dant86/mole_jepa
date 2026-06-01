@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import pathlib
 import sys
 import time
@@ -72,16 +71,6 @@ def parse_args() -> argparse.Namespace:
             "Results are printed side-by-side."
         ),
     )
-    parser.add_argument(
-        "--registry-path",
-        default=os.environ.get("REGISTRY_PATH"),
-        metavar="DIR",
-        help=(
-            "Directory containing registry.json. "
-            "Defaults to $REGISTRY_PATH from the environment."
-        ),
-    )
-
     # ── evaluation dataset ────────────────────────────────────────────────────
     parser.add_argument(
         "--coco-dataset",
@@ -288,7 +277,6 @@ def main() -> None:
         t0 = time.perf_counter()
         model = model_io.load_model(
             name,
-            registry_dir=args.registry_path,
             map_location=device,
         )
         model.to(device)
@@ -299,7 +287,7 @@ def main() -> None:
         # The image processor and tokenizer share the same HF identifier as the
         # respective encoder backbone, so we can derive DataConfig from
         # ModelConfig without storing it separately in the registry.
-        entry = registry.get_entry(name, args.registry_path)
+        entry = registry.get_entry(name)
         data_cfg = config_module.DataConfig(
             image_processor_model_name=entry.config.image_encoder_model_name,
             tokenizer_model_name=entry.config.text_encoder_model_name,
