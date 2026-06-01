@@ -62,9 +62,7 @@ exclude_lines = [
     "pragma: no cover",
     "@abc.abstractmethod",
 ]
-omit = [
-    "*/mole_jepa/registry.py",
-]
+omit = []
 
 [tool.ruff]
 line-length = 88

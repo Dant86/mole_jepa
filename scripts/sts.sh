@@ -50,5 +50,4 @@ uv sync
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
 uv run python apps/eval/sts_main.py \
-    --registry-path "${REGISTRY_PATH}" \
     "$@"

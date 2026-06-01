@@ -51,5 +51,4 @@ uv sync
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
 uv run python apps/eval/text_probe_main.py \
-    --registry-path "${REGISTRY_PATH}" \
     "$@"

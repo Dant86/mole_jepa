@@ -48,16 +48,7 @@ def parse_args() -> argparse.Namespace:
         "--config",
         required=True,
         metavar="NAME",
-        help="Named model config looked up in the NFS registry.",
-    )
-    parser.add_argument(
-        "--registry-path",
-        default=os.environ.get("REGISTRY_PATH"),
-        metavar="DIR",
-        help=(
-            "Directory containing registry.json. "
-            "Defaults to $REGISTRY_PATH from the environment."
-        ),
+        help="Named model config looked up in the Supabase registry.",
     )
 
     # ── training ──────────────────────────────────────────────────────────────
@@ -289,21 +280,19 @@ def parse_args() -> argparse.Namespace:
 def resolve_entry(
     args: argparse.Namespace,
 ) -> tuple[config_module.ModelConfig, pathlib.Path]:
-    """Resolve the model config and checkpoint directory from the NFS registry.
+    """Resolve the model config and checkpoint directory from the Supabase registry.
 
     Args:
-        args: Parsed CLI arguments (must include ``args.config`` and
-            optionally ``args.registry_path``).
+        args: Parsed CLI arguments (must include ``args.config``).
 
     Returns:
         ``(model_config, checkpoint_dir)`` tuple.
 
     Raises:
-        SystemExit: If ``args.config`` is not found in the registry, or if no
-            registry path is set in the CLI args or the environment.
+        SystemExit: If ``args.config`` is not found in the registry.
     """
     try:
-        entry = registry.get_entry(args.config, args.registry_path or None)
+        entry = registry.get_entry(args.config)
     except (KeyError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -901,9 +890,7 @@ def main() -> None:
     # OptimizedModule that prefixes all state_dict keys with "_orig_mod.".
     # Checkpoints saved from an uncompiled model use bare keys, so loading
     # into a compiled model causes a key-mismatch RuntimeError.
-    resuming = model_io.has_train_state(
-        args.config, registry_dir=args.registry_path or None
-    )
+    resuming = model_io.has_train_state(args.config)
 
     # ── W&B run ───────────────────────────────────────────────────────────────
     # Initialise after resume detection so we can set resume="allow" for
@@ -941,12 +928,9 @@ def main() -> None:
         model_io.load_model_weights(
             model,
             args.config,
-            registry_dir=args.registry_path or None,
             map_location=device,
         )
-        train_state = model_io.load_train_state(
-            args.config, registry_dir=args.registry_path or None
-        )
+        train_state = model_io.load_train_state(args.config)
         assert train_state is not None
         opt_state_dict, last_epoch, sched_state_dict = train_state
         optimizer.load_state_dict(opt_state_dict)
@@ -981,13 +965,12 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
+        model_io.save_model(model, args.config)
         model_io.save_train_state(
             optimizer,
             current_epoch,
             args.config,
             scheduler=scheduler,
-            registry_dir=args.registry_path or None,
         )
         # Explicitly tear down DataLoader workers before exiting.  If we call
         # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
@@ -1057,20 +1040,19 @@ def main() -> None:
                 epoch_log.update({f"epoch/val_{k}": v for k, v in val_stats.items()})
             epoch_log["epoch"] = epoch
             wandb.log(epoch_log, step=epoch)
-        model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
+        model_io.save_model(model, args.config)
         model_io.save_train_state(
             optimizer,
             epoch,
             args.config,
             scheduler=scheduler,
-            registry_dir=args.registry_path or None,
         )
 
     # Training completed successfully.
     # Save the final model weights, then remove the ephemeral train state —
     # it is only needed for resumption and is no longer useful.
-    model_io.save_model(model, args.config, registry_dir=args.registry_path or None)
-    model_io.cleanup_train_state(args.config, registry_dir=args.registry_path or None)
+    model_io.save_model(model, args.config)
+    model_io.cleanup_train_state(args.config)
     if wandb.run is not None:
         wandb.finish()
 

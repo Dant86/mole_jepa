@@ -64,7 +64,6 @@ if [[ "$*" != *"--config"* ]]; then
 fi
 
 uv run python apps/train/smoketest.py \
-    --registry-path     "${REGISTRY_PATH}" \
     --hf-dataset-name   "${DATACOMP_LOCAL_DIR}/shards" \
     --image-field       jpg \
     --caption-field     txt \

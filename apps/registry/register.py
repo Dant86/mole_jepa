@@ -1,7 +1,10 @@
-r"""CLI for registering, listing, and deregistering models in the NFS registry.
+r"""CLI for registering, listing, and deregistering models in the Supabase registry.
 
 Wraps :func:`mole_jepa.registry.register` so you can manage the registry
-from the cluster shell without writing a Python script.
+from the cluster shell or your laptop without writing a Python script.
+
+Requires ``$SUPABASE_URL`` and ``$SUPABASE_ANON_KEY`` to be set (or present
+in a ``.env`` file in the project root).
 
 Usage examples::
 
@@ -35,14 +38,10 @@ Usage examples::
 
     # Remove an entry (does NOT delete checkpoint files)
     uv run python apps/registry/register.py --deregister vit_base_bert_jepa_frozen
-
-All commands default --registry-path to $REGISTRY_PATH and --checkpoint-dir
-to $CHECKPOINT_DIR from the environment (or a .env file in the project root).
 """
 
 import argparse
 import json
-import os
 import pathlib
 import sys
 
@@ -54,9 +53,9 @@ from mole_jepa import config as config_module  # noqa: E402
 from mole_jepa import registry  # noqa: E402
 
 
-def _cmd_list(registry_dir: str) -> None:
+def _cmd_list() -> None:
     """Print all registered models."""
-    entries = registry.list_entries(registry_dir)
+    entries = registry.list_entries()
     if not entries:
         print("Registry is empty.")
         return
@@ -84,7 +83,7 @@ def _cmd_register(args: argparse.Namespace) -> None:
         raise SystemExit("Provide either --from-entry or --config-json.")
 
     if args.from_entry:
-        source = registry.get_entry(args.from_entry, args.registry_path)
+        source = registry.get_entry(args.from_entry)
         model_config = source.config
         if args.override_json:
             try:
@@ -112,7 +111,6 @@ def _cmd_register(args: argparse.Namespace) -> None:
         model_config,
         checkpoint_dir=args.checkpoint_dir,  # None → falls back to $CHECKPOINT_DIR
         description=args.description or "",
-        registry_dir=args.registry_path,  # None → falls back to $REGISTRY_PATH
         overwrite=args.overwrite,
     )
     print(f"Registered {entry.name!r}")
@@ -120,24 +118,18 @@ def _cmd_register(args: argparse.Namespace) -> None:
     print(f"  config hash    : {entry.config.serialize()}")
 
 
-def _cmd_deregister(name: str, registry_dir: str | None) -> None:
+def _cmd_deregister(name: str) -> None:
     """Remove an entry from the registry."""
-    registry.deregister(name, registry_dir)
+    registry.deregister(name)
     print(f"Removed {name!r} from registry (checkpoint files untouched).")
 
 
 def main() -> None:
     """Entry point."""
     parser = argparse.ArgumentParser(
-        description="Manage the MoLeJEPA NFS model registry.",
+        description="Manage the MoLeJEPA Supabase model registry.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
-    )
-    parser.add_argument(
-        "--registry-path",
-        default=os.environ.get("REGISTRY_PATH"),
-        metavar="DIR",
-        help="Registry directory. Defaults to $REGISTRY_PATH.",
     )
 
     # ── mutually exclusive top-level commands ─────────────────────────────────
@@ -202,9 +194,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.list:
-        _cmd_list(args.registry_path)
+        _cmd_list()
     elif args.deregister:
-        _cmd_deregister(args.deregister, args.registry_path)
+        _cmd_deregister(args.deregister)
     else:
         _cmd_register(args)
 

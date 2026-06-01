@@ -38,6 +38,8 @@ export PYTHONUNBUFFERED=1
 # before DataLoader forks workers, which can cause deadlocks or silent crashes.
 export TOKENIZERS_PARALLELISM=false
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
+export SUPABASE_URL="${SUPABASE_URL:-}"
+export SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}"
 # Reduces CUDA allocator fragmentation at large batch sizes.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 if ! command -v uv &> /dev/null; then
@@ -104,7 +106,6 @@ trap on_preempt USR1
 trap on_term TERM
 
 setsid uv run python apps/train/train_main.py \
-    --registry-path        "${REGISTRY_PATH}" \
     --num-epochs           100 \
     --gradient-checkpointing \
     --lr                   1e-4 \

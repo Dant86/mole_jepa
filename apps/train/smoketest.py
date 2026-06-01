@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import os
 import subprocess
 import sys
 import time
@@ -55,14 +54,6 @@ def _parse_args() -> argparse.Namespace:
             "Named model config from the NFS registry.  The model is loaded "
             "and a real forward+backward pass is run per batch so that GPU "
             "memory pressure is realistic for this specific architecture."
-        ),
-    )
-    parser.add_argument(
-        "--registry-path",
-        default=os.environ.get("REGISTRY_PATH"),
-        metavar="DIR",
-        help=(
-            "Registry directory containing registry.json. Defaults to $REGISTRY_PATH."
         ),
     )
 
@@ -148,9 +139,6 @@ def _parse_args() -> argparse.Namespace:
         "--_prefetch", type=int, dest="w_prefetch", help=argparse.SUPPRESS
     )
     parser.add_argument("--_config", dest="w_config", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--_registry-path", dest="w_registry_path", help=argparse.SUPPRESS
-    )
 
     return parser.parse_args()
 
@@ -178,7 +166,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     prefetch = args.w_prefetch
 
     # ── resolve model config from registry ────────────────────────────────────
-    entry = registry.get_entry(args.w_config, args.w_registry_path)
+    entry = registry.get_entry(args.w_config)
     model_config = entry.config
 
     data_cfg = config_module.DataConfig(
@@ -320,8 +308,6 @@ def _run_driver(args: argparse.Namespace) -> None:
             str(prefetch),
             "--_config",
             args.config,
-            "--_registry-path",
-            args.registry_path,
         ]
         if args.gradient_checkpointing:
             cmd.append("--gradient-checkpointing")

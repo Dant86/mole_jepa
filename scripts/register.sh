@@ -56,12 +56,10 @@ exec > "${LOG_DIR}/register_${SLURM_JOB_ID}.out" \
 
 # ── run ───────────────────────────────────────────────────────────────────────
 echo "[$(date)] Registering model (job ${SLURM_JOB_ID})"
-echo "[$(date)] Registry path  : ${REGISTRY_PATH}"
 echo "[$(date)] Checkpoint dir : ${CHECKPOINT_DIR}"
 
 uv sync
 uv run python apps/registry/register.py \
-    --registry-path "${REGISTRY_PATH}" \
     "$@"
 
 echo "[$(date)] Done."

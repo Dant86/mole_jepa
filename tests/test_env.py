@@ -18,24 +18,6 @@ def _clear_cache() -> None:
     env_mod._load_dotenv.cache_clear()
 
 
-# ── TestRegistryDir ───────────────────────────────────────────────────────────
-
-
-class TestRegistryDir:
-    def test_returns_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("REGISTRY_PATH", "/some/registry")
-        assert env.registry_dir() == "/some/registry"
-
-    def test_raises_when_unset(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-    ) -> None:
-        monkeypatch.delenv("REGISTRY_PATH", raising=False)
-        # chdir to a tmp dir with no .env so the fallback load finds nothing
-        monkeypatch.chdir(tmp_path)
-        with pytest.raises(RuntimeError, match="REGISTRY_PATH"):
-            env.registry_dir()
-
-
 # ── TestCheckpointDir ─────────────────────────────────────────────────────────
 
 
@@ -166,15 +148,6 @@ class TestLoadDotenv:
         """_load_dotenv() must not raise when no .env file exists."""
         monkeypatch.chdir(tmp_path)
         env_mod._load_dotenv()  # should not raise
-
-    def test_registry_dir_reads_from_dot_env(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """registry_dir() surfaces a value from .env when env var is absent."""
-        monkeypatch.delenv("REGISTRY_PATH", raising=False)
-        (tmp_path / ".env").write_text(f"REGISTRY_PATH={tmp_path}\n")
-        monkeypatch.chdir(tmp_path)
-        assert env.registry_dir() == str(tmp_path)
 
     def test_checkpoint_dir_reads_from_dot_env(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
