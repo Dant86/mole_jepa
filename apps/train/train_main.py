@@ -965,7 +965,7 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        model_io.save_model(model, args.config)
+        model_io.save_model(model, args.config, epoch=current_epoch)
         model_io.save_train_state(
             optimizer,
             current_epoch,
@@ -1040,7 +1040,7 @@ def main() -> None:
                 epoch_log.update({f"epoch/val_{k}": v for k, v in val_stats.items()})
             epoch_log["epoch"] = epoch
             wandb.log(epoch_log, step=epoch)
-        model_io.save_model(model, args.config)
+        model_io.save_model(model, args.config, epoch=epoch)
         model_io.save_train_state(
             optimizer,
             epoch,
