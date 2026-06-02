@@ -273,6 +273,17 @@ def parse_args() -> argparse.Namespace:
             "registry entry maps to a consistently named run."
         ),
     )
+    parser.add_argument(
+        "--wandb-run-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "W&B run ID.  Defaults to --config, which lets preempted jobs "
+            "resume the same run on requeue.  Pass a different value (e.g. "
+            "--wandb-run-id vitb_noncontrastive_v2) to start a fresh run "
+            "without deleting the old one."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -901,7 +912,7 @@ def main() -> None:
             entity="vedantdpathak-university-of-chicago",
             project="mole-jepa",
             name=args.wandb_run_name or args.config,
-            id=args.config,
+            id=args.wandb_run_id or args.config,
             resume="allow",
             config={
                 **dataclasses.asdict(model_config),
