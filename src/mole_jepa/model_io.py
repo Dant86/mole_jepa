@@ -32,6 +32,8 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
+import shutil
 from typing import Any
 
 import torch
@@ -89,19 +91,46 @@ def _checkpoint_dir_for(name: str) -> pathlib.Path:
     return registry.get_entry(name).checkpoint_dir
 
 
+_EPOCH_CKPT_RE = re.compile(r"^model_(\d{4})\.pt$")
+
+
+def _prune_epoch_checkpoints(checkpoint_dir: pathlib.Path, keep_last: int) -> None:
+    """Delete the oldest epoch-stamped checkpoints, keeping *keep_last*."""
+    epoch_files = sorted(
+        (int(m.group(1)), f)
+        for f in checkpoint_dir.iterdir()
+        if (m := _EPOCH_CKPT_RE.match(f.name))
+    )
+    for _, path in epoch_files[:-keep_last]:
+        path.unlink(missing_ok=True)
+
+
 def _save_model_to(
     model: models.MoLeJEPA,
     config: config_module.ModelConfig,
     checkpoint_dir: pathlib.Path,
+    *,
+    epoch: int | None = None,
+    keep_last: int = 2,
 ) -> None:
-    """Write ``model.pt`` (and ``config.json`` on first save) atomically."""
+    """Write ``model.pt`` (and ``config.json`` on first save) atomically.
+
+    If *epoch* is provided, the current ``model.pt`` is copied to
+    ``model_{epoch:04d}.pt`` before being overwritten, giving a rolling
+    backup of the last *keep_last* completed epochs.  This ensures a
+    preemption mid-save never leaves the only checkpoint corrupted.
+    """
     os.makedirs(checkpoint_dir, exist_ok=True)
     config_path = checkpoint_dir / _CONFIG_FILE
     if not config_path.exists():
         config_path.write_text(json.dumps(dataclasses.asdict(config), indent=2))
+    current = checkpoint_dir / _MODEL_FILE
+    if epoch is not None and current.exists():
+        shutil.copy2(current, checkpoint_dir / f"model_{epoch:04d}.pt")
+        _prune_epoch_checkpoints(checkpoint_dir, keep_last)
     tmp = checkpoint_dir / (_MODEL_FILE + ".tmp")
     torch.save(model.state_dict(), tmp)
-    os.replace(tmp, checkpoint_dir / _MODEL_FILE)
+    os.replace(tmp, current)
 
 
 def _load_model_weights_from(
@@ -165,6 +194,9 @@ def _load_train_state_from(
 def save_model(
     model: models.MoLeJEPA,
     name: str,
+    *,
+    epoch: int | None = None,
+    keep_last: int = 2,
 ) -> None:
     """Save model weights (and config) to the checkpoint directory for *name*.
 
@@ -172,14 +204,23 @@ def save_model(
     on the first call (never overwritten on subsequent saves).  The checkpoint
     directory is resolved from the Supabase registry entry for *name*.
 
+    When *epoch* is provided, the previous ``model.pt`` is copied to
+    ``model_{epoch:04d}.pt`` before being overwritten, maintaining a rolling
+    backup of the last *keep_last* completed epochs.
+
     Args:
         model: The model whose weights to persist.
         name: Registered model name.
+        epoch: Completed epoch number used to name the backup checkpoint.
+            Pass ``None`` (default) to skip rotation (e.g. final save).
+        keep_last: Number of epoch-stamped backups to retain.  Defaults to 2.
     """
     from mole_jepa import registry
 
     entry = registry.get_entry(name)
-    _save_model_to(model, entry.config, entry.checkpoint_dir)
+    _save_model_to(
+        model, entry.config, entry.checkpoint_dir, epoch=epoch, keep_last=keep_last
+    )
 
 
 def load_model(
