@@ -10,7 +10,7 @@ name = "mole-jepa"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "dotenv",
     "torch",
@@ -47,9 +47,9 @@ data = [
 # imghdr was removed from the Python stdlib in 3.13 (PEP 594) and has no
 # maintained PyPI release.  Use the vendored shim instead.
 imghdr = { path = "vendor/imghdr" }
-# Linux (cluster + CI): CUDA 12.1 build.
-# macOS (local dev): CPU/MPS build from the pytorch CPU index.
-# Both indexes carry modern versions; PyPI only has the ancient 0.2.0 stub.
+# PyPI only has torchvision 0.2.0 (2017); modern versions ship exclusively
+# through the pytorch wheel index. cu121 has cp312 wheels for both torch
+# and torchvision. macOS falls back to the CPU index (MPS).
 torch = [
     { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
@@ -87,7 +87,7 @@ omit = []
 
 [tool.ruff]
 line-length = 88
-target-version = "py313"
+target-version = "py312"
 exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
@@ -118,7 +118,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pyright]
-pythonVersion = "3.13"
+pythonVersion = "3.12"
 typeCheckingMode = "standard"
 reportMissingImports = true
 reportMissingTypeStubs = false
