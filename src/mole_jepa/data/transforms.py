@@ -6,6 +6,7 @@ import PIL.Image
 import torch
 import torchvision.transforms as T
 import transformers
+from torchvision.transforms import InterpolationMode
 
 from mole_jepa import config as config_module
 
@@ -73,18 +74,20 @@ def build_image_transform(
     std: list[float] = list(processor.image_std)
 
     if train:
-        spatial: list[object] = [
+        spatial: list[
+            T.RandomResizedCrop | T.RandomHorizontalFlip | T.Resize | T.CenterCrop
+        ] = [
             T.RandomResizedCrop(
                 crop_to,
                 scale=crop_scale,
                 ratio=(0.75, 1.3333),
-                interpolation=PIL.Image.Resampling.BICUBIC,
+                interpolation=InterpolationMode.BICUBIC,
             ),
             T.RandomHorizontalFlip(),
         ]
     else:
         spatial = [
-            T.Resize(resize_to, interpolation=PIL.Image.Resampling.BICUBIC),
+            T.Resize(resize_to, interpolation=InterpolationMode.BICUBIC),
             T.CenterCrop(crop_to),
         ]
 
