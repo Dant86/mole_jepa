@@ -47,18 +47,26 @@ data = [
 # imghdr was removed from the Python stdlib in 3.13 (PEP 594) and has no
 # maintained PyPI release.  Use the vendored shim instead.
 imghdr = { path = "vendor/imghdr" }
-# Use the CUDA 12.1 build on Linux (cluster + CI). macOS falls back to
-# the default PyPI index (CPU/MPS wheels).
+# Linux (cluster + CI): CUDA 12.1 build.
+# macOS (local dev): CPU/MPS build from the pytorch CPU index.
+# Both indexes carry modern versions; PyPI only has the ancient 0.2.0 stub.
 torch = [
     { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 torchvision = [
     { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
 url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.pytest.ini_options]
