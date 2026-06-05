@@ -6,7 +6,6 @@ import PIL.Image
 import torch
 import torchvision.transforms as T
 import transformers
-from torchvision.transforms import InterpolationMode  # type: ignore[attr-defined]
 
 from mole_jepa import config as config_module
 
@@ -79,13 +78,13 @@ def build_image_transform(
                 crop_to,
                 scale=crop_scale,
                 ratio=(0.75, 1.3333),
-                interpolation=InterpolationMode.BICUBIC,
+                interpolation=PIL.Image.Resampling.BICUBIC,
             ),
             T.RandomHorizontalFlip(),
         ]
     else:
         spatial = [
-            T.Resize(resize_to, interpolation=InterpolationMode.BICUBIC),
+            T.Resize(resize_to, interpolation=PIL.Image.Resampling.BICUBIC),
             T.CenterCrop(crop_to),
         ]
 
