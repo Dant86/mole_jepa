@@ -15,6 +15,7 @@ dependencies = [
     "dotenv",
     "torch",
     "torchvision",
+    "flash-attn",
     "plotly",
     "datasets",
     "webdataset",
@@ -47,6 +48,15 @@ data = [
 # imghdr was removed from the Python stdlib in 3.13 (PEP 594) and has no
 # maintained PyPI release.  Use the vendored shim instead.
 imghdr = { path = "vendor/imghdr" }
+# Pin torch/torchvision to the CUDA 12.1 build index so flash-attn can link
+# against the matching CUDA runtime.
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
