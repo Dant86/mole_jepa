@@ -6,9 +6,7 @@ import PIL.Image
 import torch
 import torchvision.transforms as T
 import transformers
-from torchvision.transforms.functional import (
-    InterpolationMode,  # type: ignore[attr-defined]
-)
+from torchvision.transforms import InterpolationMode  # type: ignore[attr-defined]
 
 from mole_jepa import config as config_module
 
