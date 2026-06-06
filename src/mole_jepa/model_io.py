@@ -227,6 +227,7 @@ def load_model(
     name: str,
     *,
     map_location: str | torch.device = "cpu",
+    attn_implementation: str | None = None,
 ) -> models.MoLeJEPA:
     """Build a model from its registered config and load its saved weights.
 
@@ -239,6 +240,9 @@ def load_model(
     Args:
         name: Registered model name.
         map_location: Device to load tensors onto.  Defaults to ``"cpu"``.
+        attn_implementation: Override the attention backend from the registered
+            config.  Useful for inference where ``"sdpa"`` is preferred over
+            ``"flash_attention_2"`` to avoid Triton JIT requirements.
 
     Returns:
         The loaded :class:`~mole_jepa.models.MoLeJEPA` model.
@@ -246,10 +250,17 @@ def load_model(
     Raises:
         FileNotFoundError: If no ``model.pt`` exists for *name*.
     """
+    import dataclasses
+
     from mole_jepa import registry
 
     entry = registry.get_entry(name)
-    model, _ = factory.build(entry.config)
+    cfg = (
+        dataclasses.replace(entry.config, attn_implementation=attn_implementation)
+        if attn_implementation is not None
+        else entry.config
+    )
+    model, _ = factory.build(cfg)
     _load_model_weights_from(model, entry.checkpoint_dir, map_location=map_location)
     return model
 
