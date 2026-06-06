@@ -59,6 +59,6 @@ uv pip install "flash-attn<2.8" --no-build-isolation --no-cache-dir
 #   sbatch scripts/eval.sh \
 #       --config vit_small_miniml_jepa_frozen vit_small_miniml_jepa_unfrozen \
 #       --coco-split test
-uv run python apps/eval/retrieval_main.py \
+uv run --no-sync python apps/eval/retrieval_main.py \
     --flat \
     "$@"

@@ -50,5 +50,5 @@ uv sync
 uv pip install "flash-attn<2.8" --no-build-isolation --no-cache-dir
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
-uv run python apps/eval/sts_main.py \
+uv run --no-sync python apps/eval/sts_main.py \
     "$@"
