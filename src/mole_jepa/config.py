@@ -55,6 +55,11 @@ class ModelConfig:
             default single-direction predictor ``fθ: z_v → ẑ_t`` gives no
             gradient signal in the reverse direction.  Defaults to ``False``
             so existing registry entries are unaffected.
+        jepa_cosine_loss: If ``True``, replace MSE with cosine distance
+            ``1 − cos(ẑ_t, z_t)`` for both the forward and reverse prediction
+            terms.  Cosine loss is scale-invariant and forces the predictor to
+            match the *direction* of the target rather than its magnitude,
+            making the task harder and encouraging more informative embeddings.
     """
 
     embed_dim: int = 256
@@ -74,6 +79,7 @@ class ModelConfig:
     freeze_image_encoder: bool = True
     attn_implementation: str = "sdpa"
     reverse_predictor: bool = False
+    jepa_cosine_loss: bool = False
 
     def serialize(self) -> str:
         """Serialize this config to a stable SHA-256 hex string.
