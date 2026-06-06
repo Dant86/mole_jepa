@@ -279,7 +279,7 @@ def main() -> None:
             name,
             map_location=device,
         )
-        model.to(device)
+        model.to(device=device, dtype=torch.bfloat16)
         model.eval()
         print(f"  Loaded in {time.perf_counter() - t0:.1f}s")
 
