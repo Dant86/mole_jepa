@@ -280,7 +280,7 @@ def main() -> None:
             map_location=device,
             attn_implementation="sdpa",
         )
-        model.to(device=device, dtype=torch.bfloat16)
+        model.to(device)
         model.eval()
         print(f"  Loaded in {time.perf_counter() - t0:.1f}s")
 
