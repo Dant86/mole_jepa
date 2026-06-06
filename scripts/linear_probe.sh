@@ -49,6 +49,7 @@ mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 export HF_TOKEN="${HF_TOKEN:-}"
 
 uv sync
+uv pip install "flash-attn<2.8" --no-build-isolation --no-cache-dir
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
 uv run python apps/eval/linear_probe_main.py \

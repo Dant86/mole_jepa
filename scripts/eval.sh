@@ -52,6 +52,7 @@ mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 export HF_TOKEN="${HF_TOKEN:-}"
 
 uv sync
+uv pip install "flash-attn<2.8" --no-build-isolation --no-cache-dir
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
 # Pass --config NAME [NAME ...] and any other flags via "$@", e.g.:

@@ -60,7 +60,7 @@ mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}"
 
 mkdir -p "${CHECKPOINT_DIR}"
 uv sync
-uv pip install flash-attn --no-build-isolation --no-cache-dir
+uv pip install "flash-attn<2.8" --no-build-isolation --no-cache-dir
 
 # ── train ─────────────────────────────────────────────────────────────────────
 # Run Python in the background so we can trap SIGUSR1 here in bash and forward
