@@ -32,16 +32,16 @@ class JEPALossOutput:
 
 
 class JEPALoss(nn.Module):
-    """MSE prediction loss with per-modality SIGReg regularization.
+    """Prediction loss with per-modality SIGReg regularization.
 
     Computes:
 
-        L = λ_image · SIGReg(z_v) + λ_text · SIGReg(z_t) + MSE(ẑ_t, z_t)
+        L = λ_image · SIGReg(z_v) + λ_text · SIGReg(z_t) + L_pred(ẑ_t, z_t)
 
-    The MSE weight is implicitly 1; ``lam_image`` and ``lam_text`` independently
-    scale the regularization pressure on each modality.  This decoupling allows
-    pushing hard on text isotropy (high ``lam_text``) without inflating the
-    image regularization or shrinking the prediction signal.
+    where ``L_pred`` is either MSE or cosine distance depending on
+    ``cosine_loss``.  The prediction weight is implicitly 1; ``lam_image``
+    and ``lam_text`` independently scale the regularization pressure on each
+    modality.
 
     Either regularization term can be disabled independently via
     ``regularize_z_i`` and ``regularize_z_t``. With a frozen image encoder,
@@ -62,6 +62,8 @@ class JEPALoss(nn.Module):
         regularize_z_t: If ``True`` (default), apply SIGReg to the text
             embeddings ``z_t``. If ``False``, ``z_t`` serves as an
             unregularized prediction target.
+        cosine_loss: If ``True``, use cosine distance ``1 − cos(ẑ, z)``
+            instead of MSE for both the forward and reverse prediction terms.
     """
 
     def __init__(
@@ -71,6 +73,7 @@ class JEPALoss(nn.Module):
         lam_text: float = 0.05,
         regularize_z_i: bool = True,
         regularize_z_t: bool = True,
+        cosine_loss: bool = False,
     ) -> None:
         super().__init__()
         self.regularizer = regularizer
@@ -78,6 +81,17 @@ class JEPALoss(nn.Module):
         self.lam_text = lam_text
         self.regularize_z_i = regularize_z_i
         self.regularize_z_t = regularize_z_t
+        self.cosine_loss = cosine_loss
+
+    def _pred_loss(
+        self, prediction: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute the prediction loss between *prediction* and *target*."""
+        if self.cosine_loss:
+            return (
+                1.0 - functional.cosine_similarity(prediction, target, dim=-1)
+            ).mean()
+        return functional.mse_loss(prediction, target)
 
     def forward(self, output: models.MoLeJEPAOutput) -> JEPALossOutput:
         """Compute the JEPA loss for a batch of model outputs.
@@ -95,9 +109,9 @@ class JEPALoss(nn.Module):
             ``z_hat_v``.
         """
         zero = torch.zeros([], device=output.z_v.device, dtype=output.z_v.dtype)
-        loss_mse = functional.mse_loss(output.z_hat_t, output.z_t)
+        loss_mse = self._pred_loss(output.z_hat_t, output.z_t)
         loss_mse_reverse = (
-            functional.mse_loss(output.z_hat_v, output.z_v)
+            self._pred_loss(output.z_hat_v, output.z_v)
             if output.z_hat_v is not None
             else zero
         )
