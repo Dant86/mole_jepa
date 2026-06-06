@@ -11,6 +11,7 @@
 #SBATCH --job-name=mole_jepa_sts
 #SBATCH --partition=general
 #SBATCH --qos=general
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=0:20:00
