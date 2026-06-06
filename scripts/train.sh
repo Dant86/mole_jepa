@@ -106,7 +106,7 @@ on_term() {
 trap on_preempt USR1
 trap on_term TERM
 
-setsid uv run python apps/train/train_main.py \
+setsid uv run --no-sync python apps/train/train_main.py \
     --num-epochs           100 \
     --gradient-checkpointing \
     --lr                   1e-4 \
