@@ -60,6 +60,12 @@ class ModelConfig:
             terms.  Cosine loss is scale-invariant and forces the predictor to
             match the *direction* of the target rather than its magnitude,
             making the task harder and encouraging more informative embeddings.
+        jepa_spherical_uniformity: If ``True``, replace SIGReg with the
+            Wang & Isola (2020) spherical uniformity loss.  Embeddings are
+            L2-normalised before the regularizer so the target distribution is
+            the uniform distribution on S^{d-1}, which is theoretically the
+            correct entropy-maximising distribution for cosine-based objectives.
+            Pairs naturally with ``jepa_cosine_loss=True``.
     """
 
     embed_dim: int = 256
@@ -80,6 +86,7 @@ class ModelConfig:
     attn_implementation: str = "sdpa"
     reverse_predictor: bool = False
     jepa_cosine_loss: bool = False
+    jepa_spherical_uniformity: bool = False
 
     def serialize(self) -> str:
         """Serialize this config to a stable SHA-256 hex string.

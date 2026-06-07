@@ -55,12 +55,17 @@ def build(config: config_module.ModelConfig) -> tuple[models.MoLeJEPA, nn.Module
     if config.contrastive:
         loss = losses.InfoNCELoss(temperature=config.info_nce_temperature)
     else:
-        loss = losses.JEPALoss(
-            regularizer=regularizers.SIGReg(
+        regularizer: nn.Module = (
+            regularizers.SphericalUniformity()
+            if config.jepa_spherical_uniformity
+            else regularizers.SIGReg(
                 test_statistic=test_statistics.epps_pulley(config.sigreg_dist),
                 n_directions=config.sigreg_n_directions,
                 demean=config.sigreg_demean,
-            ),
+            )
+        )
+        loss = losses.JEPALoss(
+            regularizer=regularizer,
             lam_image=config.jepa_lam_image,
             lam_text=config.jepa_lam_text,
             regularize_z_i=config.jepa_regularize_z_i,
