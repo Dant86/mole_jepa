@@ -216,6 +216,37 @@ def encode_captions(
     return torch.cat(parts, dim=0)
 
 
+@torch.inference_mode()
+def encode_captions_projected(
+    model: models.MoLeJEPA,
+    loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
+    device: torch.device,
+) -> torch.Tensor:
+    """Encode captions through the reverse predictor (z_t → ẑ_v).
+
+    Used for t2i retrieval: the reverse predictor maps text embeddings into
+    the image embedding space, so ẑ_v can be compared directly against z_v.
+
+    Args:
+        model: A MoLeJEPA model with a ``reverse_predictor`` head.
+        loader: DataLoader yielding ``(input_ids, attention_mask)`` tuples.
+        device: Target device for inference.
+
+    Returns:
+        Float tensor of shape ``(N_caps, embed_dim)`` on CPU.
+    """
+    assert model.reverse_predictor is not None, "Model has no reverse predictor."
+    model.eval()
+    parts: list[torch.Tensor] = []
+    for input_ids, attention_mask in loader:
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+        z_t = model.text_encoder(input_ids, attention_mask)
+        z_hat_v = model.reverse_predictor(z_t)
+        parts.append(z_hat_v.cpu())
+    return torch.cat(parts, dim=0)
+
+
 # ── result formatting ─────────────────────────────────────────────────────────
 
 
@@ -321,10 +352,12 @@ def main() -> None:
         )
 
         # ── encode ────────────────────────────────────────────────────────────
-        # For JEPA models the predictor maps z_v into the text embedding space;
-        # retrieval compares ẑ_t = predictor(z_v) against z_t.
-        # For contrastive models both encoders are directly aligned.
+        # i2t: ẑ_t = f(z_v) vs z_t  (forward predictor maps image → text space)
+        # t2i: ẑ_v = g(z_t) vs z_v  (reverse predictor maps text → image space)
+        # Contrastive models are directly aligned; no predictor needed.
         use_predictor = not entry.config.contrastive
+        use_reverse = use_predictor and entry.config.reverse_predictor
+
         print(
             f"Encoding images "
             f"({'z_v → predictor → ẑ_t' if use_predictor else 'z_v direct'}) …"
@@ -335,16 +368,33 @@ def main() -> None:
         )
         print(f"  {image_embs.shape} in {time.perf_counter() - t0:.1f}s")
 
-        print("Encoding captions …")
+        print("Encoding captions (z_t) …")
         t0 = time.perf_counter()
         text_embs = encode_captions(model, cap_loader, device)
         print(f"  {text_embs.shape} in {time.perf_counter() - t0:.1f}s")
+
+        t2i_image_embs: torch.Tensor | None = None
+        t2i_text_embs: torch.Tensor | None = None
+        if use_reverse:
+            print("Encoding images raw (z_v, for t2i) …")
+            t0 = time.perf_counter()
+            t2i_image_embs = encode_images(
+                model, img_loader, device, use_predictor=False
+            )
+            print(f"  {t2i_image_embs.shape} in {time.perf_counter() - t0:.1f}s")
+
+            print("Encoding captions via reverse predictor (z_t → ẑ_v, for t2i) …")
+            t0 = time.perf_counter()
+            t2i_text_embs = encode_captions_projected(model, cap_loader, device)
+            print(f"  {t2i_text_embs.shape} in {time.perf_counter() - t0:.1f}s")
 
         # ── metrics ───────────────────────────────────────────────────────────
         result = retrieval_metrics(
             image_embs,
             text_embs,
             captions_per_image=coco.captions_per_image,
+            t2i_image_embs=t2i_image_embs,
+            t2i_text_embs=t2i_text_embs,
         )
         all_results.append((name, result))
         print(_fmt_row(name, result))
