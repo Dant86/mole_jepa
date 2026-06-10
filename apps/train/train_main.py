@@ -22,8 +22,73 @@ import wandb
 from mole_jepa import config as config_module
 from mole_jepa import data as data_module
 from mole_jepa import factory, losses, model_io, models, registry
+from mole_jepa.data.coco import COCODataset
+from mole_jepa.evaluation.retrieval import retrieval_metrics
 
 _STATS_FILE = "stats.jsonl"
+
+
+@torch.inference_mode()
+def _eval_retrieval(
+    model: models.MoLeJEPA,
+    retrieval_dataset: COCODataset,
+    data_cfg: config_module.DataConfig,
+    batch_size: int,
+    device: torch.device,
+    use_predictor: bool,
+) -> dict[str, float]:
+    """Run retrieval eval on a pre-loaded dataset and return metric dict.
+
+    Args:
+        model: Model to evaluate (must be in eval mode on entry, restored after).
+        retrieval_dataset: Pre-loaded :class:`COCODataset`.
+        data_cfg: Data config matching the model's encoders.
+        batch_size: Encoding batch size.
+        use_predictor: If ``True``, pass image embeddings through the predictor
+            (standard for JEPA models).
+        device: Device to run encoding on.
+
+    Returns:
+        Dict with keys ``retrieval/i2t_r1``, ``retrieval/i2t_r5``,
+        ``retrieval/t2i_r1``, ``retrieval/t2i_r5``.
+    """
+    was_training = model.training
+    model.eval()
+
+    img_loader = retrieval_dataset.image_loader(batch_size=batch_size, num_workers=2)
+    cap_loader = retrieval_dataset.caption_loader(batch_size=batch_size, num_workers=2)
+
+    # Encode images.
+    img_parts: list[torch.Tensor] = []
+    for (pixel_values,) in img_loader:
+        emb = model.image_encoder(pixel_values.to(device))
+        if use_predictor:
+            emb = model.predictor(emb)
+        img_parts.append(emb.cpu())
+    image_embs = torch.cat(img_parts)
+
+    # Encode captions.
+    cap_parts: list[torch.Tensor] = []
+    for input_ids, attention_mask in cap_loader:
+        emb = model.text_encoder(input_ids.to(device), attention_mask.to(device))
+        cap_parts.append(emb.cpu())
+    text_embs = torch.cat(cap_parts)
+
+    result = retrieval_metrics(
+        image_embs,
+        text_embs,
+        captions_per_image=retrieval_dataset.captions_per_image,
+    )
+
+    if was_training:
+        model.train()
+
+    return {
+        "retrieval/i2t_r1": result.i2t_r1,
+        "retrieval/i2t_r5": result.i2t_r5,
+        "retrieval/t2i_r1": result.t2i_r1,
+        "retrieval/t2i_r5": result.t2i_r5,
+    }
 
 
 def _get_device() -> torch.device:
@@ -283,6 +348,37 @@ def parse_args() -> argparse.Namespace:
             "--wandb-run-id vitb_noncontrastive_v2) to start a fresh run "
             "without deleting the old one."
         ),
+    )
+
+    # ── in-training retrieval eval ────────────────────────────────────────────
+    parser.add_argument(
+        "--eval-retrieval",
+        action="store_true",
+        default=False,
+        help=(
+            "Run a lightweight retrieval eval after each epoch and log "
+            "i2t/t2i R@1 to W&B.  Dataset is loaded once before training "
+            "and cached in memory."
+        ),
+    )
+    parser.add_argument(
+        "--eval-retrieval-dataset",
+        default="clip-benchmark/wds_flickr30k",
+        metavar="DATASET",
+        help="HuggingFace dataset for in-training retrieval eval.",
+    )
+    parser.add_argument(
+        "--eval-retrieval-split",
+        default="test",
+        metavar="SPLIT",
+        help="Dataset split for in-training retrieval eval (default: test).",
+    )
+    parser.add_argument(
+        "--eval-retrieval-batch-size",
+        type=int,
+        default=128,
+        metavar="N",
+        help="Batch size for retrieval encoding (default: 128).",
     )
 
     return parser.parse_args()
@@ -783,6 +879,29 @@ def main() -> None:
         shuffle=False,
     )
 
+    # ── optional in-training retrieval dataset ────────────────────────────────
+    retrieval_eval_dataset: COCODataset | None = None
+    if args.eval_retrieval:
+        print(
+            f"\nPre-loading retrieval eval dataset "
+            f"'{args.eval_retrieval_dataset}' split='{args.eval_retrieval_split}' …"
+        )
+        _ret_hf = hf_datasets.load_dataset(  # type: ignore[call-overload]
+            args.eval_retrieval_dataset, split=args.eval_retrieval_split
+        )
+        retrieval_eval_dataset = COCODataset(
+            hf_dataset=_ret_hf,
+            config=data_config,
+            captions_per_image=5,
+            caption_field="txt",
+            image_field="jpg",
+            flat=True,
+        )
+        print(
+            f"  {retrieval_eval_dataset.n_images:,} images × "
+            f"{retrieval_eval_dataset.captions_per_image} captions loaded."
+        )
+
     model, loss_fn = factory.build(model_config)
     model = model.to(device)
     loss_fn = loss_fn.to(device)
@@ -1050,6 +1169,20 @@ def main() -> None:
             if val_stats is not None:
                 epoch_log.update({f"epoch/val_{k}": v for k, v in val_stats.items()})
             epoch_log["epoch"] = epoch
+            if retrieval_eval_dataset is not None:
+                ret_metrics = _eval_retrieval(
+                    model,
+                    retrieval_eval_dataset,
+                    data_config,
+                    args.eval_retrieval_batch_size,
+                    device,
+                    use_predictor=not model_config.contrastive,
+                )
+                epoch_log.update(ret_metrics)
+                print(
+                    f"  retrieval  i2t R@1={ret_metrics['retrieval/i2t_r1']:.3f}"
+                    f"  t2i R@1={ret_metrics['retrieval/t2i_r1']:.3f}"
+                )
             wandb.log(epoch_log, step=epoch)
         model_io.save_model(model, args.config, epoch=epoch)
         model_io.save_train_state(
