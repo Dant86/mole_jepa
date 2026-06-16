@@ -135,6 +135,72 @@ class TestSaveLoadModel:
         assert isinstance(contents, dict)
         assert all(isinstance(v, torch.Tensor) for v in contents.values())
 
+    def test_epoch_rotation_backs_up_previous_model(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registered_model: str,
+    ) -> None:
+        """save_model(epoch=N) copies the *previous* model.pt to model_NNNN.pt."""
+        model, _ = model_and_optimizer
+        mio.save_model(model, registered_model)  # no epoch -> no backup yet
+        ckpt = reg_module.get_checkpoint_dir(registered_model)
+        assert not (ckpt / "model_0001.pt").exists()
+
+        mio.save_model(model, registered_model, epoch=1)
+        assert (ckpt / "model_0001.pt").exists()
+        assert (ckpt / "model.pt").exists()
+
+    def test_first_epoch_save_has_no_prior_model_to_back_up(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registered_model: str,
+    ) -> None:
+        """epoch=0 on a fresh checkpoint dir: no model.pt exists yet to copy."""
+        model, _ = model_and_optimizer
+        mio.save_model(model, registered_model, epoch=0)
+        ckpt = reg_module.get_checkpoint_dir(registered_model)
+        assert (ckpt / "model.pt").exists()
+        assert not (ckpt / "model_0000.pt").exists()
+
+    def test_keep_last_prunes_oldest_epoch_checkpoints(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registered_model: str,
+    ) -> None:
+        model, _ = model_and_optimizer
+        ckpt = reg_module.get_checkpoint_dir(registered_model)
+        mio.save_model(model, registered_model)  # seed model.pt
+        for epoch in range(1, 5):
+            mio.save_model(model, registered_model, epoch=epoch, keep_last=2)
+
+        epoch_files = sorted(ckpt.glob("model_[0-9]*.pt"))
+        assert [f.name for f in epoch_files] == ["model_0003.pt", "model_0004.pt"]
+
+    def test_keep_last_one_retains_only_most_recent(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registered_model: str,
+    ) -> None:
+        model, _ = model_and_optimizer
+        ckpt = reg_module.get_checkpoint_dir(registered_model)
+        mio.save_model(model, registered_model)
+        for epoch in range(1, 4):
+            mio.save_model(model, registered_model, epoch=epoch, keep_last=1)
+
+        epoch_files = sorted(ckpt.glob("model_[0-9]*.pt"))
+        assert [f.name for f in epoch_files] == ["model_0003.pt"]
+
+    def test_no_epoch_kwarg_never_creates_epoch_backups(
+        self,
+        model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],
+        registered_model: str,
+    ) -> None:
+        model, _ = model_and_optimizer
+        ckpt = reg_module.get_checkpoint_dir(registered_model)
+        for _ in range(3):
+            mio.save_model(model, registered_model)  # epoch=None every time
+        assert list(ckpt.glob("model_[0-9]*.pt")) == []
+
     def test_load_model_round_trip(
         self,
         model_and_optimizer: tuple[models.MoLeJEPA, torch.optim.Optimizer],

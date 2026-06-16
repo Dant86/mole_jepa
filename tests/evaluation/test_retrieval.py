@@ -77,3 +77,57 @@ class TestRetrievalMetrics:
 
         assert perfect.i2t_r1 > random.i2t_r1
         assert perfect.t2i_r1 > random.t2i_r1
+
+
+class TestT2IDirect:
+    """Tests for the reverse-predictor t2i path (t2i_image_embs/t2i_text_embs)."""
+
+    def test_perfect_t2i_embeddings_give_recall_one(self) -> None:
+        # i2t uses mismatched embeddings (so i2t alone would not be perfect),
+        # but the dedicated t2i_image_embs/t2i_text_embs pair is perfectly
+        # aligned -- t2i should be driven entirely by that pair.
+        image_embs, text_embs = _perfect_embeddings()
+        torch.manual_seed(1)
+        mismatched_image_embs = torch.randn(_N, _D)
+
+        result = evaluation.retrieval_metrics(
+            mismatched_image_embs,
+            text_embs,
+            _CPI,
+            t2i_image_embs=image_embs,
+            t2i_text_embs=text_embs,
+        )
+        assert result.t2i_r1 == pytest.approx(1.0)
+        assert result.t2i_r5 == pytest.approx(1.0)
+        assert result.t2i_r10 == pytest.approx(1.0)
+
+    def test_t2i_direct_overrides_transposed_fallback(self) -> None:
+        # Default (no override) t2i falls back to transposing the i2t sim
+        # matrix, which is poor when image_embs/text_embs are mismatched.
+        # Supplying a well-aligned t2i pair should do strictly better.
+        torch.manual_seed(2)
+        mismatched_image_embs = torch.randn(_N, _D)
+        mismatched_text_embs = torch.randn(_N * _CPI, _D)
+        perfect_image_embs, perfect_text_embs = _perfect_embeddings()
+
+        fallback = evaluation.retrieval_metrics(
+            mismatched_image_embs, mismatched_text_embs, _CPI
+        )
+        direct = evaluation.retrieval_metrics(
+            mismatched_image_embs,
+            mismatched_text_embs,
+            _CPI,
+            t2i_image_embs=perfect_image_embs,
+            t2i_text_embs=perfect_text_embs,
+        )
+        assert direct.t2i_r1 >= fallback.t2i_r1
+        assert direct.t2i_r1 == pytest.approx(1.0)
+
+    def test_only_one_of_the_pair_falls_back_to_transposed(self) -> None:
+        # Passing only one of t2i_image_embs/t2i_text_embs should not engage
+        # the direct path -- both must be provided.
+        image_embs, text_embs = _perfect_embeddings()
+        result = evaluation.retrieval_metrics(
+            image_embs, text_embs, _CPI, t2i_image_embs=image_embs
+        )
+        assert result.t2i_r1 == pytest.approx(1.0)  # falls back, still perfect here

@@ -80,6 +80,10 @@ class TestRegister:
         import mole_jepa.env as env_mod
 
         env_mod._load_dotenv.cache_clear()
+        # Block both .env candidates (cwd and editable-install project root) —
+        # otherwise this picks up the real project .env, which has
+        # CHECKPOINT_DIR set, defeating the "no env" case under test.
+        monkeypatch.setattr(pathlib.Path, "exists", lambda self: False)
         with pytest.raises(RuntimeError, match="CHECKPOINT_DIR"):
             registry.register("bad", _cfg())
 
@@ -205,3 +209,86 @@ class TestEntryHash:
         assert entry.checkpoint_dir == pathlib.Path("/tmp/ckpts") / _entry_hash(
             "h_check", cfg
         )
+
+
+# ---------------------------------------------------------------------------
+# TestRowToEntry
+# ---------------------------------------------------------------------------
+
+
+class TestRowToEntry:
+    def test_config_stored_as_json_string_is_parsed(
+        self, fake_supabase: object
+    ) -> None:
+        """Supabase's jsonb columns sometimes come back as a JSON string
+        rather than an already-parsed dict, depending on client version."""
+        import json
+
+        cfg = _cfg(embed_dim=64)
+        _register("string_config", config=cfg)
+        # Mutate the fake store directly to simulate a string-encoded config.
+        row = fake_supabase._store["string_config"]  # type: ignore[attr-defined]
+        row["config"] = json.dumps(row["config"])
+
+        entry = registry.get_entry("string_config")
+        assert entry.config.embed_dim == 64
+
+
+# ---------------------------------------------------------------------------
+# TestSbClient
+# ---------------------------------------------------------------------------
+
+
+class TestSbClient:
+    def test_returns_cached_client_without_reinit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = object()
+        monkeypatch.setattr(registry, "_sb_client", sentinel)
+        assert registry._sb() is sentinel
+
+    def test_raises_import_error_when_supabase_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(registry, "_sb_client", None)
+        monkeypatch.setattr("mole_jepa.env._load_dotenv", lambda: None)
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "supabase":
+                raise ImportError("no supabase")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        with pytest.raises(ImportError, match="supabase"):
+            registry._sb()
+
+    def test_raises_runtime_error_when_env_vars_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(registry, "_sb_client", None)
+        monkeypatch.setattr("mole_jepa.env._load_dotenv", lambda: None)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_ANON_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="SUPABASE_URL"):
+            registry._sb()
+
+    def test_creates_and_caches_client_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(registry, "_sb_client", None)
+        monkeypatch.setattr("mole_jepa.env._load_dotenv", lambda: None)
+        monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+        monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
+
+        created = object()
+        fake_supabase_module = type(
+            "module", (), {"create_client": lambda url, key: created}
+        )
+        monkeypatch.setitem(__import__("sys").modules, "supabase", fake_supabase_module)
+
+        client = registry._sb()
+        assert client is created
+        assert registry._sb_client is created
