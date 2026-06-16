@@ -120,3 +120,149 @@ class TestCOCODataset:
 
         assert ds.n_images == 3
         assert len(ds._captions) == 3 * 2
+
+
+# ---------------------------------------------------------------------------
+# TestFlatMode
+# ---------------------------------------------------------------------------
+
+
+def _make_flat_hf_dataset(
+    n_images: int,
+    captions_per_image: int = _CAPTIONS_PER_IMAGE,
+    image_field: str = "jpg",
+    caption_field: str = "txt",
+    trailing_partial: int = 0,
+) -> list[dict]:
+    """Build a flat (one row per image-caption pair) dataset.
+
+    Each image group shares a distinct sentinel image object so tests can
+    verify only the *first* row of each group's image is used.
+
+    Args:
+        trailing_partial: If > 0, append this many extra rows belonging to
+            one more (incomplete) trailing image group.
+    """
+    rows: list[dict] = []
+    for i in range(n_images):
+        image = unittest.mock.MagicMock(name=f"image_{i}")
+        for j in range(captions_per_image):
+            rows.append({image_field: image, caption_field: f"image {i} caption {j}"})
+    if trailing_partial:
+        image = unittest.mock.MagicMock(name="image_trailing")
+        for j in range(trailing_partial):
+            rows.append({image_field: image, caption_field: f"trailing caption {j}"})
+    return rows
+
+
+def _build_flat_dataset(
+    hf_dataset: list[dict],
+    captions_per_image: int = _CAPTIONS_PER_IMAGE,
+    image_field: str = "jpg",
+    caption_field: str = "txt",
+) -> coco.COCODataset:
+    image_transform = unittest.mock.MagicMock(return_value=torch.randn(_C, _H, _W))
+    tokenize = unittest.mock.MagicMock(
+        return_value=(
+            torch.randint(0, 100, (_MAX_LENGTH,)),
+            torch.ones(_MAX_LENGTH, dtype=torch.long),
+        )
+    )
+    with (
+        unittest.mock.patch(
+            "mole_jepa.data.transforms.build_image_transform",
+            return_value=image_transform,
+        ),
+        unittest.mock.patch(
+            "mole_jepa.data.transforms.build_tokenizer",
+            return_value=tokenize,
+        ),
+    ):
+        return coco.COCODataset(
+            hf_dataset,  # type: ignore[arg-type]
+            _make_config(),
+            captions_per_image=captions_per_image,
+            caption_field=caption_field,
+            image_field=image_field,
+            flat=True,
+        )
+
+
+class TestFlatMode:
+    def test_n_images_exact_multiple(self) -> None:
+        hf_dataset = _make_flat_hf_dataset(n_images=_N_IMAGES)
+        ds = _build_flat_dataset(hf_dataset)
+        assert ds.n_images == _N_IMAGES
+
+    def test_total_captions_exact_multiple(self) -> None:
+        hf_dataset = _make_flat_hf_dataset(n_images=_N_IMAGES)
+        ds = _build_flat_dataset(hf_dataset)
+        assert len(ds._captions) == _N_IMAGES * _CAPTIONS_PER_IMAGE
+
+    def test_trailing_partial_group_is_included(self) -> None:
+        # 2 full groups of 5 plus a trailing partial group of 3.
+        hf_dataset = _make_flat_hf_dataset(n_images=2, trailing_partial=3)
+        ds = _build_flat_dataset(hf_dataset)
+        # The partial group still contributes one image.
+        assert ds.n_images == 3
+
+    def test_trailing_partial_group_is_padded_to_full_width(self) -> None:
+        hf_dataset = _make_flat_hf_dataset(n_images=2, trailing_partial=3)
+        ds = _build_flat_dataset(hf_dataset)
+        # Captions are padded with empty strings so every image has exactly
+        # captions_per_image entries, keeping the tensor shapes consistent.
+        assert len(ds._captions) == 3 * _CAPTIONS_PER_IMAGE
+
+    def test_no_trailing_partial_group_when_evenly_divisible(self) -> None:
+        hf_dataset = _make_flat_hf_dataset(n_images=_N_IMAGES, trailing_partial=0)
+        ds = _build_flat_dataset(hf_dataset)
+        assert ds.n_images == _N_IMAGES
+        assert len(ds._captions) == _N_IMAGES * _CAPTIONS_PER_IMAGE
+
+    def test_custom_field_names(self) -> None:
+        hf_dataset = _make_flat_hf_dataset(
+            n_images=2, image_field="picture", caption_field="alt_text"
+        )
+        ds = _build_flat_dataset(
+            hf_dataset, image_field="picture", caption_field="alt_text"
+        )
+        assert ds.n_images == 2
+
+    def test_image_loader_and_caption_loader_work_in_flat_mode(self) -> None:
+        hf_dataset = _make_flat_hf_dataset(n_images=_N_IMAGES)
+        ds = _build_flat_dataset(hf_dataset)
+        total_images = sum(pv.shape[0] for (pv,) in ds.image_loader(batch_size=1))
+        total_caps = sum(ids.shape[0] for ids, _ in ds.caption_loader(batch_size=1))
+        assert total_images == _N_IMAGES
+        assert total_caps == _N_IMAGES * _CAPTIONS_PER_IMAGE
+
+    def test_only_first_row_of_group_used_for_image(self) -> None:
+        # build_image_transform should be called exactly n_images times in
+        # flat mode (once per group, using buf[0]), not once per row.
+        hf_dataset = _make_flat_hf_dataset(n_images=_N_IMAGES)
+        image_transform = unittest.mock.MagicMock(return_value=torch.randn(_C, _H, _W))
+        tokenize = unittest.mock.MagicMock(
+            return_value=(
+                torch.randint(0, 100, (_MAX_LENGTH,)),
+                torch.ones(_MAX_LENGTH, dtype=torch.long),
+            )
+        )
+        with (
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_image_transform",
+                return_value=image_transform,
+            ),
+            unittest.mock.patch(
+                "mole_jepa.data.transforms.build_tokenizer",
+                return_value=tokenize,
+            ),
+        ):
+            coco.COCODataset(
+                hf_dataset,  # type: ignore[arg-type]
+                _make_config(),
+                captions_per_image=_CAPTIONS_PER_IMAGE,
+                image_field="jpg",
+                caption_field="txt",
+                flat=True,
+            )
+        assert image_transform.call_count == _N_IMAGES

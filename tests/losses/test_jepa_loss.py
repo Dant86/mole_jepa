@@ -112,3 +112,80 @@ class TestJEPALoss:
         )
         result = loss_fn(_make_output())
         assert result.loss.item() == pytest.approx(result.loss_mse.item(), rel=1e-5)
+
+
+class TestCosineLoss:
+    """Tests for cosine_loss=True (the 1 - cos(pred, target) prediction term)."""
+
+    def _loss_fn(
+        self, regularize_z_i: bool = True, regularize_z_t: bool = True
+    ) -> losses.JEPALoss:
+        reg = regularizers.SIGReg(test_statistics.epps_pulley("gaussian"))
+        return losses.JEPALoss(
+            regularizer=reg,
+            lam_image=_LAM_IMAGE,
+            lam_text=_LAM_TEXT,
+            cosine_loss=True,
+            regularize_z_i=regularize_z_i,
+            regularize_z_t=regularize_z_t,
+        )
+
+    def test_parallel_vectors_give_zero_loss(self) -> None:
+        z_t = torch.randn(_N, _D)
+        result = self._loss_fn()(_make_output(z_hat_t=z_t.clone(), z_t=z_t))
+        assert result.loss_mse.item() == pytest.approx(0.0, abs=1e-6)
+
+    def test_orthogonal_vectors_give_loss_one(self) -> None:
+        z_t = torch.zeros(1, 2)
+        z_t[0, 0] = 1.0
+        z_hat_t = torch.zeros(1, 2)
+        z_hat_t[0, 1] = 1.0
+        output = mole_jepa_module.MoLeJEPAOutput(
+            z_v=torch.randn(1, 2), z_hat_t=z_hat_t, z_t=z_t
+        )
+        result = self._loss_fn()(output)
+        assert result.loss_mse.item() == pytest.approx(1.0, abs=1e-6)
+
+    def test_opposite_vectors_give_loss_two(self) -> None:
+        z_t = torch.zeros(1, 2)
+        z_t[0, 0] = 1.0
+        z_hat_t = torch.zeros(1, 2)
+        z_hat_t[0, 0] = -1.0
+        output = mole_jepa_module.MoLeJEPAOutput(
+            z_v=torch.randn(1, 2), z_hat_t=z_hat_t, z_t=z_t
+        )
+        result = self._loss_fn()(output)
+        assert result.loss_mse.item() == pytest.approx(2.0, abs=1e-6)
+
+    def test_scale_invariant_unlike_mse(self) -> None:
+        """Cosine loss ignores magnitude; MSE on the same inputs would not."""
+        z_t = torch.randn(_N, _D)
+        z_hat_t = z_t * 5.0  # same direction, different magnitude
+        output = _make_output(z_hat_t=z_hat_t, z_t=z_t)
+        result = self._loss_fn()(output)
+        assert result.loss_mse.item() == pytest.approx(0.0, abs=1e-6)
+
+    def test_applies_to_reverse_direction_too(self) -> None:
+        z_v = torch.randn(_N, _D)
+        output = mole_jepa_module.MoLeJEPAOutput(
+            z_v=z_v,
+            z_hat_t=torch.randn(_N, _D),
+            z_t=torch.randn(_N, _D),
+            z_hat_v=z_v.clone(),
+        )
+        result = self._loss_fn()(output)
+        assert result.loss_mse_reverse.item() == pytest.approx(0.0, abs=1e-6)
+
+    def test_differs_from_mse_for_same_inputs(self) -> None:
+        output = _make_output()
+        cosine_result = self._loss_fn()(output)
+        mse_loss_fn = losses.JEPALoss(
+            regularizer=regularizers.SIGReg(test_statistics.epps_pulley("gaussian")),
+            lam_image=_LAM_IMAGE,
+            lam_text=_LAM_TEXT,
+            cosine_loss=False,
+        )
+        mse_result = mse_loss_fn(output)
+        assert cosine_result.loss_mse.item() != pytest.approx(
+            mse_result.loss_mse.item()
+        )

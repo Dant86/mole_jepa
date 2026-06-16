@@ -31,6 +31,10 @@ class TestCheckpointDir:
     ) -> None:
         monkeypatch.delenv("CHECKPOINT_DIR", raising=False)
         monkeypatch.chdir(tmp_path)
+        # _load_dotenv falls back to the real project .env (editable-install
+        # path) which has CHECKPOINT_DIR set — block both candidates so this
+        # test exercises the genuinely-unset case.
+        monkeypatch.setattr(pathlib.Path, "exists", lambda self: False)
         with pytest.raises(RuntimeError, match="CHECKPOINT_DIR"):
             env.checkpoint_dir()
 
