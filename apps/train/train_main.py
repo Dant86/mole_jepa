@@ -1183,7 +1183,12 @@ def main() -> None:
                     f"  retrieval  i2t R@1={ret_metrics['retrieval/i2t_r1']:.3f}"
                     f"  t2i R@1={ret_metrics['retrieval/t2i_r1']:.3f}"
                 )
-            wandb.log(epoch_log, step=epoch)
+            # No explicit `step=` here — the per-batch loop above already logs
+            # without one, so W&B's internal step counter is far ahead of the
+            # epoch number by this point.  Passing step=epoch would be earlier
+            # than the current step and get silently dropped.  Use "epoch" as
+            # a custom x-axis in the W&B UI instead (Edit panel → X axis).
+            wandb.log(epoch_log)
         model_io.save_model(model, args.config, epoch=epoch)
         model_io.save_train_state(
             optimizer,

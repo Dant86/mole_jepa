@@ -36,52 +36,68 @@ _BASE = dict(
 
 _LAMBDAS = [0.25, 0.5, 1.0, 2.0]
 
-# ── sweep configs ─────────────────────────────────────────────────────────────
 
-_CONFIGS: list[tuple[str, dict]] = []
+def _build_configs(tag: str) -> list[tuple[str, dict]]:
+    """Build the sweep config list, with *tag* appended to every name.
 
-for lam in _LAMBDAS:
-    lam_tag = str(lam).replace(".", "")
+    Args:
+        tag: Suffix appended to each config name (e.g. a version or date
+            string) so reruns get fresh registry entries instead of
+            colliding with a previous sweep's (possibly stale) checkpoints.
 
-    # Spherical: cosine loss + Wang-Isola uniformity
-    _CONFIGS.append(
-        (
-            f"sweep_sphere_lam{lam_tag}",
-            {
-                **_BASE,
-                "jepa_cosine_loss": True,
-                "jepa_spherical_uniformity": True,
-                "jepa_lam_image": lam,
-                "jepa_lam_text": lam,
-            },
+    Returns:
+        List of ``(name, kwargs)`` tuples.
+    """
+    configs: list[tuple[str, dict]] = []
+    for lam in _LAMBDAS:
+        lam_tag = str(lam).replace(".", "")
+
+        # Spherical: cosine loss + Wang-Isola uniformity
+        configs.append(
+            (
+                f"sweep_sphere_lam{lam_tag}_{tag}",
+                {
+                    **_BASE,
+                    "jepa_cosine_loss": True,
+                    "jepa_spherical_uniformity": True,
+                    "jepa_lam_image": lam,
+                    "jepa_lam_text": lam,
+                },
+            )
         )
-    )
 
-    # Gaussian: MSE + SIGReg (1024 directions)
-    _CONFIGS.append(
-        (
-            f"sweep_gauss_lam{lam_tag}",
-            {
-                **_BASE,
-                "jepa_cosine_loss": False,
-                "jepa_spherical_uniformity": False,
-                "jepa_lam_image": lam,
-                "jepa_lam_text": lam,
-                "sigreg_n_directions": 1024,
-                "sigreg_dist": "gaussian",
-                "sigreg_demean": False,
-            },
+        # Gaussian: MSE + SIGReg (1024 directions)
+        configs.append(
+            (
+                f"sweep_gauss_lam{lam_tag}_{tag}",
+                {
+                    **_BASE,
+                    "jepa_cosine_loss": False,
+                    "jepa_spherical_uniformity": False,
+                    "jepa_lam_image": lam,
+                    "jepa_lam_text": lam,
+                    "sigreg_n_directions": 1024,
+                    "sigreg_dist": "gaussian",
+                    "sigreg_demean": False,
+                },
+            )
         )
-    )
-
-
-def _lam_str(lam: float) -> str:
-    return str(lam).rstrip("0").rstrip(".")
+    return configs
 
 
 def main() -> None:
     """Register configs and print/submit sbatch commands."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--tag",
+        default="v1",
+        metavar="TAG",
+        help=(
+            "Suffix appended to every config name (default: 'v1'). "
+            "Bump this on reruns (e.g. --tag v2) so new registry entries "
+            "and checkpoint dirs don't collide with a previous sweep."
+        ),
+    )
     parser.add_argument(
         "--submit",
         action="store_true",
@@ -94,8 +110,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print(f"Registering {len(_CONFIGS)} sweep configs …\n")
-    for name, kwargs in _CONFIGS:
+    configs = _build_configs(args.tag)
+
+    print(f"Registering {len(configs)} sweep configs (tag={args.tag!r}) …\n")
+    for name, kwargs in configs:
         cfg = ModelConfig(**kwargs)
         geometry = "sphere" if kwargs.get("jepa_spherical_uniformity") else "gaussian"
         lam = kwargs["jepa_lam_image"]
@@ -109,9 +127,7 @@ def main() -> None:
             )
 
     print("\nsbatch commands:\n")
-    commands = [
-        f"sbatch scripts/sweep_train.sh --config {name}" for name, _ in _CONFIGS
-    ]
+    commands = [f"sbatch scripts/sweep_train.sh --config {name}" for name, _ in configs]
     for cmd in commands:
         print(f"  {cmd}")
 

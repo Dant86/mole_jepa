@@ -33,6 +33,7 @@ export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export SUPABASE_URL="${SUPABASE_URL:-}"
 export SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export WANDB_MODE=offline
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
@@ -72,7 +73,7 @@ trap on_preempt USR1
 trap on_term TERM
 
 setsid uv run --no-sync python apps/train/train_main.py \
-    --num-epochs           20 \
+    --num-epochs           8 \
     --gradient-checkpointing \
     --lr                   1e-4 \
     --weight-decay         1e-4 \
