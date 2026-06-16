@@ -45,7 +45,12 @@ exec > "${LOG_DIR}/sweep_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/sweep_${SLURM_JOB_I
 
 mkdir -p "${TMPDIR}" "${HF_DATASETS_CACHE}" "${CHECKPOINT_DIR}"
 uv sync
-uv pip install "flash-attn<2.8" --no-build-isolation --no-cache-dir
+# No flash-attn here: every sweep config uses attn_implementation="sdpa".
+# Installing it anyway is actively harmful — ModernBERT eagerly imports
+# flash_attn at module load time if it's merely *installed* (regardless of
+# the chosen backend), and a broken/partial build (likely on generic gpu:1
+# allocations across heterogeneous nodes) crashes model construction even
+# though sdpa never needed it.
 
 # ── train ─────────────────────────────────────────────────────────────────────
 PY_PID=""
