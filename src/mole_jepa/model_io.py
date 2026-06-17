@@ -29,17 +29,51 @@ remain available for notebook exploration of a checkpoint root directory.
 """
 
 import dataclasses
+import errno
 import json
 import os
 import pathlib
 import re
 import shutil
+import time
+from collections.abc import Callable
 from typing import Any
 
 import torch
 
 from mole_jepa import config as config_module
 from mole_jepa import factory, models
+
+# NFS transient error codes that are safe to retry.
+_NFS_TRANSIENT = frozenset(
+    {
+        errno.ESTALE,  # 116 — stale file handle (most common on this cluster)
+        errno.EIO,  # 5   — I/O error
+        errno.EBUSY,  # 16  — device or resource busy
+        errno.ETIMEDOUT,  # 110 — connection timed out
+        errno.EAGAIN,  # 11  — try again
+    }
+)
+
+
+def _nfs_op(
+    fn: Callable[..., Any], /, *args: Any, retries: int = 5, **kwargs: Any
+) -> Any:
+    """Call *fn* retrying on transient NFS errors with exponential backoff."""
+    for attempt in range(retries):
+        try:
+            return fn(*args, **kwargs)
+        except OSError as exc:
+            if exc.errno not in _NFS_TRANSIENT or attempt == retries - 1:
+                raise
+            delay = 2.0**attempt
+            print(
+                f"[model_io] NFS error {exc.errno} ({exc.strerror}),"
+                f" retry {attempt + 1}/{retries} in {delay:.0f}s",
+                flush=True,
+            )
+            time.sleep(delay)
+
 
 _MODEL_FILE = "model.pt"
 _CONFIG_FILE = "config.json"
@@ -136,14 +170,16 @@ def _save_model_to(
     os.makedirs(checkpoint_dir, exist_ok=True)
     config_path = checkpoint_dir / _CONFIG_FILE
     if not config_path.exists():
-        config_path.write_text(json.dumps(dataclasses.asdict(config), indent=2))
+        _nfs_op(
+            config_path.write_text, json.dumps(dataclasses.asdict(config), indent=2)
+        )
     current = checkpoint_dir / _MODEL_FILE
     if epoch is not None and current.exists():
-        shutil.copy2(current, checkpoint_dir / f"model_{epoch:04d}.pt")
+        _nfs_op(shutil.copy2, current, checkpoint_dir / f"model_{epoch:04d}.pt")
         _prune_epoch_checkpoints(checkpoint_dir, keep_last)
     tmp = checkpoint_dir / (_MODEL_FILE + ".tmp")
-    torch.save(model.state_dict(), tmp)
-    os.replace(tmp, current)
+    _nfs_op(torch.save, model.state_dict(), tmp)
+    _nfs_op(os.replace, tmp, current)
 
 
 def _load_model_weights_from(
@@ -159,8 +195,8 @@ def _load_model_weights_from(
             f"No saved model found at {model_path}. "
             "Run training first, or check that the model name is correct."
         )
-    state_dict: dict[str, Any] = torch.load(
-        model_path, map_location=map_location, weights_only=True
+    state_dict: dict[str, Any] = _nfs_op(
+        torch.load, model_path, map_location=map_location, weights_only=True
     )
     model.load_state_dict(state_dict)
 
@@ -175,7 +211,8 @@ def _save_train_state_to(
     """Write ``train_state.pt`` atomically to *checkpoint_dir*."""
     os.makedirs(checkpoint_dir, exist_ok=True)
     tmp = checkpoint_dir / (_TRAIN_STATE_FILE + ".tmp")
-    torch.save(
+    _nfs_op(
+        torch.save,
         {
             "epoch": epoch,
             "optimizer_state_dict": optimizer.state_dict(),
@@ -183,7 +220,7 @@ def _save_train_state_to(
         },
         tmp,
     )
-    os.replace(tmp, checkpoint_dir / _TRAIN_STATE_FILE)
+    _nfs_op(os.replace, tmp, checkpoint_dir / _TRAIN_STATE_FILE)
 
 
 def _load_train_state_from(
@@ -193,7 +230,9 @@ def _load_train_state_from(
     path = checkpoint_dir / _TRAIN_STATE_FILE
     if not path.exists():
         return None
-    state: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=True)
+    state: dict[str, Any] = _nfs_op(
+        torch.load, path, map_location="cpu", weights_only=True
+    )
     return (
         state["optimizer_state_dict"],
         state["epoch"],
@@ -210,24 +249,34 @@ def _save_checkpoint_to(
     *,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     keep_last: int = 3,
-    local_tmpdir: str | pathlib.Path | None = None,
 ) -> None:
     """Write a combined checkpoint (weights + optimizer + scheduler + epoch) atomically.
 
-    Writes to *local_tmpdir* first (fast local NVMe) if provided, verifies
-    the file loads cleanly, then copies to NFS and does a single atomic rename.
+    Writes to a .tmp file then renames atomically, so a mid-write kill never
+    leaves a partial file in place of the previous good checkpoint.
     This eliminates the race where model.pt and train_state.pt are written
     separately and SIGKILL hits between them, producing mismatched state.
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
     config_path = checkpoint_dir / _CONFIG_FILE
     if not config_path.exists():
-        config_path.write_text(json.dumps(dataclasses.asdict(config), indent=2))
+        _nfs_op(
+            config_path.write_text, json.dumps(dataclasses.asdict(config), indent=2)
+        )
 
     current = checkpoint_dir / _CHECKPOINT_FILE
     if current.exists():
-        shutil.copy2(current, checkpoint_dir / f"checkpoint_{epoch:04d}.pt")
-        _prune_combined_checkpoints(checkpoint_dir, keep_last)
+        try:
+            _nfs_op(
+                shutil.copy2, current, checkpoint_dir / f"checkpoint_{epoch:04d}.pt"
+            )
+            _prune_combined_checkpoints(checkpoint_dir, keep_last)
+        except OSError as exc:
+            print(
+                f"[model_io] WARNING: backup rotation failed ({exc}); "
+                "continuing — current checkpoint is still intact.",
+                flush=True,
+            )
 
     payload = {
         "epoch": epoch,
@@ -236,26 +285,9 @@ def _save_checkpoint_to(
         "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
     }
 
-    nfs_tmp = checkpoint_dir / (_CHECKPOINT_FILE + ".tmp")
-    if local_tmpdir and os.path.isdir(local_tmpdir):
-        local_tmp = pathlib.Path(local_tmpdir) / (_CHECKPOINT_FILE + ".tmp")
-        torch.save(payload, local_tmp)
-        try:
-            torch.load(local_tmp, map_location="cpu", weights_only=False)
-        except Exception as exc:
-            local_tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"Checkpoint verification failed: {exc}") from exc
-        shutil.copy2(local_tmp, nfs_tmp)
-        local_tmp.unlink(missing_ok=True)
-    else:
-        torch.save(payload, nfs_tmp)
-        try:
-            torch.load(nfs_tmp, map_location="cpu", weights_only=False)
-        except Exception as exc:
-            nfs_tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"Checkpoint verification failed: {exc}") from exc
-
-    os.replace(nfs_tmp, current)
+    tmp = checkpoint_dir / (_CHECKPOINT_FILE + ".tmp")
+    _nfs_op(torch.save, payload, tmp)
+    _nfs_op(os.replace, tmp, current)
 
 
 def _load_checkpoint_from(
@@ -273,8 +305,8 @@ def _load_checkpoint_from(
     path = checkpoint_dir / _CHECKPOINT_FILE
     if not path.exists():
         return None
-    state: dict[str, Any] = torch.load(
-        path, map_location=map_location, weights_only=False
+    state: dict[str, Any] = _nfs_op(
+        torch.load, path, map_location=map_location, weights_only=False
     )
     model.load_state_dict(state["model_state_dict"])
     optimizer.load_state_dict(state["optimizer_state_dict"])
@@ -389,17 +421,12 @@ def save_checkpoint(
     *,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     keep_last: int = 3,
-    local_tmpdir: str | pathlib.Path | None = None,
 ) -> None:
     """Save a combined checkpoint (weights + optimizer + scheduler + epoch) atomically.
 
     Uses a single file so that model weights and optimizer state are always
     in sync — the two-file race (where SIGKILL between save_model and
     save_train_state leaves mismatched state on resume) cannot occur.
-
-    When *local_tmpdir* is provided (e.g. ``os.environ.get("TMPDIR")``), the
-    checkpoint is written to fast local storage first, verified, then copied
-    to the NFS checkpoint directory and renamed atomically.
 
     Args:
         model: The model to checkpoint.
@@ -408,7 +435,6 @@ def save_checkpoint(
         name: Registered model name.
         scheduler: Optional LR scheduler to persist.
         keep_last: Number of epoch-stamped backups to retain.
-        local_tmpdir: Optional path to fast local scratch space (e.g. $TMPDIR).
     """
     from mole_jepa import registry
 
@@ -421,7 +447,6 @@ def save_checkpoint(
         entry.checkpoint_dir,
         scheduler=scheduler,
         keep_last=keep_last,
-        local_tmpdir=local_tmpdir,
     )
 
 
