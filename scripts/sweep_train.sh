@@ -12,7 +12,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=6:00:00
-#SBATCH --signal=B:USR1@300
+#SBATCH --signal=B:USR1@900
 #SBATCH --requeue
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err

@@ -1055,15 +1055,14 @@ def main() -> None:
 
     start_epoch = 0
     if resuming:
-        model_io.load_model_weights(
+        last_epoch = model_io.load_checkpoint(
             model,
+            optimizer,
             args.config,
+            scheduler=scheduler,
             map_location=device,
         )
-        train_state = model_io.load_train_state(args.config)
-        assert train_state is not None
-        opt_state_dict, last_epoch, sched_state_dict = train_state
-        optimizer.load_state_dict(opt_state_dict)
+        assert last_epoch is not None
         # load_state_dict restores the saved LR/weight-decay, which would
         # silently ignore any --lr / --weight-decay passed at the command line.
         # Override each param group so CLI flags always win on resume.
@@ -1072,8 +1071,6 @@ def main() -> None:
         for group in optimizer.param_groups:
             group["lr"] = args.lr * group.get("lr_multiplier", 1.0)
             group["weight_decay"] = args.weight_decay
-        if scheduler is not None and sched_state_dict is not None:
-            scheduler.load_state_dict(sched_state_dict)
         start_epoch = last_epoch + 1
         print(f"Resuming from epoch {start_epoch}")
     else:
@@ -1095,12 +1092,13 @@ def main() -> None:
 
     def _checkpoint_and_exit(*_: object) -> None:
         print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        model_io.save_model(model, args.config, epoch=current_epoch)
-        model_io.save_train_state(
+        model_io.save_checkpoint(
+            model,
             optimizer,
             current_epoch,
             args.config,
             scheduler=scheduler,
+            local_tmpdir=os.environ.get("TMPDIR"),
         )
         # Explicitly tear down DataLoader workers before exiting.  If we call
         # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
@@ -1189,12 +1187,13 @@ def main() -> None:
             # than the current step and get silently dropped.  Use "epoch" as
             # a custom x-axis in the W&B UI instead (Edit panel → X axis).
             wandb.log(epoch_log)
-        model_io.save_model(model, args.config, epoch=epoch)
-        model_io.save_train_state(
+        model_io.save_checkpoint(
+            model,
             optimizer,
             epoch,
             args.config,
             scheduler=scheduler,
+            local_tmpdir=os.environ.get("TMPDIR"),
         )
 
     # Training completed successfully.
