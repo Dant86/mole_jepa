@@ -44,6 +44,8 @@ from mole_jepa import factory, models
 _MODEL_FILE = "model.pt"
 _CONFIG_FILE = "config.json"
 _TRAIN_STATE_FILE = "train_state.pt"
+_CHECKPOINT_FILE = "checkpoint.pt"
+_EPOCH_CKPT_RE_V2 = re.compile(r"^checkpoint_(\d{4})\.pt$")
 
 
 @dataclasses.dataclass
@@ -100,6 +102,17 @@ def _prune_epoch_checkpoints(checkpoint_dir: pathlib.Path, keep_last: int) -> No
         (int(m.group(1)), f)
         for f in checkpoint_dir.iterdir()
         if (m := _EPOCH_CKPT_RE.match(f.name))
+    )
+    for _, path in epoch_files[:-keep_last]:
+        path.unlink(missing_ok=True)
+
+
+def _prune_combined_checkpoints(checkpoint_dir: pathlib.Path, keep_last: int) -> None:
+    """Delete the oldest combined epoch-stamped checkpoints, keeping *keep_last*."""
+    epoch_files = sorted(
+        (int(m.group(1)), f)
+        for f in checkpoint_dir.iterdir()
+        if (m := _EPOCH_CKPT_RE_V2.match(f.name))
     )
     for _, path in epoch_files[:-keep_last]:
         path.unlink(missing_ok=True)
@@ -186,6 +199,88 @@ def _load_train_state_from(
         state["epoch"],
         state.get("scheduler_state_dict"),
     )
+
+
+def _save_checkpoint_to(
+    model: models.MoLeJEPA,
+    config: config_module.ModelConfig,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    checkpoint_dir: pathlib.Path,
+    *,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    keep_last: int = 3,
+    local_tmpdir: str | pathlib.Path | None = None,
+) -> None:
+    """Write a combined checkpoint (weights + optimizer + scheduler + epoch) atomically.
+
+    Writes to *local_tmpdir* first (fast local NVMe) if provided, verifies
+    the file loads cleanly, then copies to NFS and does a single atomic rename.
+    This eliminates the race where model.pt and train_state.pt are written
+    separately and SIGKILL hits between them, producing mismatched state.
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    config_path = checkpoint_dir / _CONFIG_FILE
+    if not config_path.exists():
+        config_path.write_text(json.dumps(dataclasses.asdict(config), indent=2))
+
+    current = checkpoint_dir / _CHECKPOINT_FILE
+    if current.exists():
+        shutil.copy2(current, checkpoint_dir / f"checkpoint_{epoch:04d}.pt")
+        _prune_combined_checkpoints(checkpoint_dir, keep_last)
+
+    payload = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+    }
+
+    nfs_tmp = checkpoint_dir / (_CHECKPOINT_FILE + ".tmp")
+    if local_tmpdir and os.path.isdir(local_tmpdir):
+        local_tmp = pathlib.Path(local_tmpdir) / (_CHECKPOINT_FILE + ".tmp")
+        torch.save(payload, local_tmp)
+        try:
+            torch.load(local_tmp, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            local_tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"Checkpoint verification failed: {exc}") from exc
+        shutil.copy2(local_tmp, nfs_tmp)
+        local_tmp.unlink(missing_ok=True)
+    else:
+        torch.save(payload, nfs_tmp)
+        try:
+            torch.load(nfs_tmp, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            nfs_tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"Checkpoint verification failed: {exc}") from exc
+
+    os.replace(nfs_tmp, current)
+
+
+def _load_checkpoint_from(
+    model: models.MoLeJEPA,
+    optimizer: torch.optim.Optimizer,
+    checkpoint_dir: pathlib.Path,
+    *,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    map_location: str | torch.device = "cpu",
+) -> int | None:
+    """Load a combined checkpoint into *model*, *optimizer*, and *scheduler*.
+
+    Returns the saved epoch, or ``None`` if no combined checkpoint exists.
+    """
+    path = checkpoint_dir / _CHECKPOINT_FILE
+    if not path.exists():
+        return None
+    state: dict[str, Any] = torch.load(
+        path, map_location=map_location, weights_only=False
+    )
+    model.load_state_dict(state["model_state_dict"])
+    optimizer.load_state_dict(state["optimizer_state_dict"])
+    if scheduler is not None and state.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(state["scheduler_state_dict"])
+    return int(state["epoch"])
 
 
 # ── name-based public API ─────────────────────────────────────────────────────
@@ -286,6 +381,94 @@ def load_model_weights(
     _load_model_weights_from(model, ckpt, map_location=map_location)
 
 
+def save_checkpoint(
+    model: models.MoLeJEPA,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    name: str,
+    *,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    keep_last: int = 3,
+    local_tmpdir: str | pathlib.Path | None = None,
+) -> None:
+    """Save a combined checkpoint (weights + optimizer + scheduler + epoch) atomically.
+
+    Uses a single file so that model weights and optimizer state are always
+    in sync — the two-file race (where SIGKILL between save_model and
+    save_train_state leaves mismatched state on resume) cannot occur.
+
+    When *local_tmpdir* is provided (e.g. ``os.environ.get("TMPDIR")``), the
+    checkpoint is written to fast local storage first, verified, then copied
+    to the NFS checkpoint directory and renamed atomically.
+
+    Args:
+        model: The model to checkpoint.
+        optimizer: The optimizer whose state to persist.
+        epoch: Most recently completed (or in-progress) epoch number.
+        name: Registered model name.
+        scheduler: Optional LR scheduler to persist.
+        keep_last: Number of epoch-stamped backups to retain.
+        local_tmpdir: Optional path to fast local scratch space (e.g. $TMPDIR).
+    """
+    from mole_jepa import registry
+
+    entry = registry.get_entry(name)
+    _save_checkpoint_to(
+        model,
+        entry.config,
+        optimizer,
+        epoch,
+        entry.checkpoint_dir,
+        scheduler=scheduler,
+        keep_last=keep_last,
+        local_tmpdir=local_tmpdir,
+    )
+
+
+def load_checkpoint(
+    model: models.MoLeJEPA,
+    optimizer: torch.optim.Optimizer,
+    name: str,
+    *,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    map_location: str | torch.device = "cpu",
+) -> int | None:
+    """Load a combined checkpoint into *model*, *optimizer*, and *scheduler*.
+
+    Falls back to the legacy two-file format (``model.pt`` + ``train_state.pt``)
+    when no combined ``checkpoint.pt`` is present, enabling in-place upgrades of
+    existing runs.
+
+    Args:
+        model: An already-constructed model to load weights into.
+        optimizer: The optimizer to restore.
+        name: Registered model name.
+        scheduler: Optional LR scheduler to restore.
+        map_location: Device to load tensors onto.
+
+    Returns:
+        The saved epoch number, or ``None`` if no resumable checkpoint exists.
+    """
+    ckpt = _checkpoint_dir_for(name)
+    epoch = _load_checkpoint_from(
+        model, optimizer, ckpt, scheduler=scheduler, map_location=map_location
+    )
+    if epoch is not None:
+        return epoch
+    # Legacy fallback: separate model.pt + train_state.pt written by old code.
+    if not (ckpt / _MODEL_FILE).exists():
+        return None
+    _load_model_weights_from(model, ckpt, map_location=map_location)
+    train_state = _load_train_state_from(ckpt)
+    if train_state is None:
+        return None
+    opt_state, saved_epoch, sched_state = train_state
+    optimizer.load_state_dict(opt_state)
+    if scheduler is not None and sched_state is not None:
+        scheduler.load_state_dict(sched_state)
+    return saved_epoch
+
+
 def has_train_state(name: str) -> bool:
     """Return ``True`` if a resumable train state exists for *name*.
 
@@ -293,10 +476,10 @@ def has_train_state(name: str) -> bool:
         name: Registered model name.
 
     Returns:
-        ``True`` if ``train_state.pt`` is present in the checkpoint directory.
+        ``True`` if ``checkpoint.pt`` or ``train_state.pt`` is present.
     """
     ckpt = _checkpoint_dir_for(name)
-    return (ckpt / _TRAIN_STATE_FILE).exists()
+    return (ckpt / _CHECKPOINT_FILE).exists() or (ckpt / _TRAIN_STATE_FILE).exists()
 
 
 def save_train_state(
