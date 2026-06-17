@@ -752,6 +752,14 @@ def run_epoch(
 
             if train:
                 assert optimizer is not None
+                if not torch.isfinite(loss):
+                    print(
+                        f"WARNING: non-finite loss ({loss.item()}) at epoch {epoch}"
+                        f" batch {batch_idx} — skipping update.",
+                        flush=True,
+                    )
+                    optimizer.zero_grad()
+                    continue
                 optimizer.zero_grad()
                 loss.backward()
                 if grad_clip > 0:
@@ -778,14 +786,17 @@ def run_epoch(
                     f"  {parts}  lr {current_lr:.2e}  samples/s {samples_per_sec:,.0f}"
                 )
                 if wandb.run is not None:
-                    wandb.log(
-                        {f"step/{k}": v for k, v in components.items()}
-                        | {
-                            "step/lr": current_lr,
-                            "step/samples_per_sec": samples_per_sec,
-                            "step/epoch": epoch,
-                        }
-                    )
+                    try:
+                        wandb.log(
+                            {f"step/{k}": v for k, v in components.items()}
+                            | {
+                                "step/lr": current_lr,
+                                "step/samples_per_sec": samples_per_sec,
+                                "step/epoch": epoch,
+                            }
+                        )
+                    except Exception as exc:
+                        print(f"WARNING: wandb.log failed: {exc}", flush=True)
 
     elapsed = time.monotonic() - epoch_t0
     elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
@@ -1091,15 +1102,27 @@ def main() -> None:
     current_epoch = start_epoch
 
     def _checkpoint_and_exit(*_: object) -> None:
-        print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.")
-        model_io.save_checkpoint(
-            model,
-            optimizer,
-            current_epoch,
-            args.config,
-            scheduler=scheduler,
-            local_tmpdir=os.environ.get("TMPDIR"),
-        )
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)  # block re-entry during save
+        print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.", flush=True)
+        try:
+            model_io.save_checkpoint(
+                model,
+                optimizer,
+                current_epoch,
+                args.config,
+                scheduler=scheduler,
+            )
+        except Exception as exc:
+            print(f"ERROR: checkpoint save failed: {exc}", file=sys.stderr, flush=True)
+            try:
+                model_io.save_model(model, args.config)
+                print("Fallback: saved model weights only.", flush=True)
+            except Exception as exc2:
+                print(
+                    f"ERROR: fallback model save also failed: {exc2}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         # Explicitly tear down DataLoader workers before exiting.  If we call
         # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
         # worker processes are orphaned and Python's multiprocessing resource
@@ -1168,32 +1191,37 @@ def main() -> None:
                 epoch_log.update({f"epoch/val_{k}": v for k, v in val_stats.items()})
             epoch_log["epoch"] = epoch
             if retrieval_eval_dataset is not None:
-                ret_metrics = _eval_retrieval(
-                    model,
-                    retrieval_eval_dataset,
-                    data_config,
-                    args.eval_retrieval_batch_size,
-                    device,
-                    use_predictor=not model_config.contrastive,
-                )
-                epoch_log.update(ret_metrics)
-                print(
-                    f"  retrieval  i2t R@1={ret_metrics['retrieval/i2t_r1']:.3f}"
-                    f"  t2i R@1={ret_metrics['retrieval/t2i_r1']:.3f}"
-                )
+                try:
+                    ret_metrics = _eval_retrieval(
+                        model,
+                        retrieval_eval_dataset,
+                        data_config,
+                        args.eval_retrieval_batch_size,
+                        device,
+                        use_predictor=not model_config.contrastive,
+                    )
+                    epoch_log.update(ret_metrics)
+                    print(
+                        f"  retrieval  i2t R@1={ret_metrics['retrieval/i2t_r1']:.3f}"
+                        f"  t2i R@1={ret_metrics['retrieval/t2i_r1']:.3f}"
+                    )
+                except Exception as exc:
+                    print(f"WARNING: retrieval eval failed: {exc}", flush=True)
             # No explicit `step=` here — the per-batch loop above already logs
             # without one, so W&B's internal step counter is far ahead of the
             # epoch number by this point.  Passing step=epoch would be earlier
             # than the current step and get silently dropped.  Use "epoch" as
             # a custom x-axis in the W&B UI instead (Edit panel → X axis).
-            wandb.log(epoch_log)
+            try:
+                wandb.log(epoch_log)
+            except Exception as exc:
+                print(f"WARNING: wandb.log failed: {exc}", flush=True)
         model_io.save_checkpoint(
             model,
             optimizer,
             epoch,
             args.config,
             scheduler=scheduler,
-            local_tmpdir=os.environ.get("TMPDIR"),
         )
 
     # Training completed successfully.
