@@ -79,6 +79,8 @@ class ModelConfig:
     sigreg_demean: bool = False
     jepa_lam_image: float = 0.05
     jepa_lam_text: float = 0.05
+    jepa_lam_image_end: float | None = None
+    jepa_lam_text_end: float | None = None
     jepa_regularize_z_i: bool = True
     jepa_regularize_z_t: bool = True
     info_nce_temperature: float = 0.07

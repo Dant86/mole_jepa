@@ -1151,6 +1151,22 @@ def main() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         current_epoch = epoch
 
+        # λ annealing: ramp jepa_lam_* → jepa_lam_*_end linearly over training.
+        if model_config.jepa_lam_image_end is not None:
+            t = epoch / max(args.num_epochs - 1, 1)
+            loss_fn.lam_image = model_config.jepa_lam_image + t * (
+                model_config.jepa_lam_image_end - model_config.jepa_lam_image
+            )
+            if model_config.jepa_lam_text_end is not None:
+                loss_fn.lam_text = model_config.jepa_lam_text + t * (
+                    model_config.jepa_lam_text_end - model_config.jepa_lam_text
+                )
+            print(
+                f"  λ annealing  epoch={epoch}  t={t:.3f}"
+                f"  lam_image={loss_fn.lam_image:.4f}  lam_text={loss_fn.lam_text:.4f}",
+                flush=True,
+            )
+
         # --max-batches (smoke-test override) takes precedence; otherwise use
         # the value derived from --max-train-samples.
         effective_max_batches = args.max_batches or max_train_batches
@@ -1190,6 +1206,9 @@ def main() -> None:
             if val_stats is not None:
                 epoch_log.update({f"epoch/val_{k}": v for k, v in val_stats.items()})
             epoch_log["epoch"] = epoch
+            if hasattr(loss_fn, "lam_image"):
+                epoch_log["epoch/lam_image"] = loss_fn.lam_image
+                epoch_log["epoch/lam_text"] = loss_fn.lam_text
             if retrieval_eval_dataset is not None:
                 try:
                     ret_metrics = _eval_retrieval(
