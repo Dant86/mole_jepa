@@ -88,19 +88,27 @@ def _build_configs(tag: str) -> list[tuple[str, dict]]:
     return configs
 
 
-def _build_anneal_configs(tag: str) -> list[tuple[str, dict]]:
-    """Build λ-annealing configs that ramp from 0 → lam_end over training.
+def _build_anneal_configs(tag: str, lam_start: float = 0.0) -> list[tuple[str, dict]]:
+    """Build λ-annealing configs that ramp from lam_start → lam_end over training.
 
     Each run traces the full λ curve in one shot, letting you read off λ* from
     the W&B retrieval curve rather than needing a separate run per λ value.
+
+    Args:
+        tag: Suffix appended to each config name.
+        lam_start: Starting λ value. Use a small non-zero value (e.g. 0.05) to
+            prevent full representation collapse during the first epoch, which
+            can make recovery harder once λ ramps up.
     """
     configs: list[tuple[str, dict]] = []
-    for lam_start, lam_end in _ANNEAL_LAMBDAS:
+    start_tag = str(lam_start).replace(".", "")
+    for _, lam_end in _ANNEAL_LAMBDAS:
         end_tag = str(lam_end).replace(".", "")
+        name_infix = f"lam{start_tag}to{end_tag}"
 
         configs.append(
             (
-                f"sweep_anneal_sphere_lam{end_tag}_{tag}",
+                f"sweep_anneal_sphere_{name_infix}_{tag}",
                 {
                     **_BASE,
                     "jepa_cosine_loss": True,
@@ -115,7 +123,7 @@ def _build_anneal_configs(tag: str) -> list[tuple[str, dict]]:
 
         configs.append(
             (
-                f"sweep_anneal_gauss_lam{end_tag}_{tag}",
+                f"sweep_anneal_gauss_{name_infix}_{tag}",
                 {
                     **_BASE,
                     "jepa_cosine_loss": False,
@@ -162,13 +170,26 @@ def main() -> None:
         action="store_true",
         help=(
             "Register λ-annealing configs instead of fixed-λ configs. "
-            "Each run ramps λ linearly from 0 → lam_end over all training epochs."
+            "Each run ramps λ linearly from --lam-start → lam_end over all epochs."
+        ),
+    )
+    parser.add_argument(
+        "--lam-start",
+        type=float,
+        default=0.0,
+        metavar="LAM",
+        help=(
+            "Starting λ for annealing runs (default: 0.0). Use a small non-zero "
+            "value (e.g. 0.05) to prevent representation collapse during epoch 0. "
+            "Only used with --anneal."
         ),
     )
     args = parser.parse_args()
 
     configs = (
-        _build_anneal_configs(args.tag) if args.anneal else _build_configs(args.tag)
+        _build_anneal_configs(args.tag, lam_start=args.lam_start)
+        if args.anneal
+        else _build_configs(args.tag)
     )
 
     print(f"Registering {len(configs)} sweep configs (tag={args.tag!r}) …\n")
