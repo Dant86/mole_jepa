@@ -1,6 +1,7 @@
 """Driver file for training."""
 
 import argparse
+import collections.abc
 import contextlib
 import dataclasses
 import datetime
@@ -703,6 +704,7 @@ def run_epoch(
     grad_clip: float = 0.0,
     log_interval: int = 100,
     max_batches: int | None = None,
+    preempt_check: collections.abc.Callable[[], None] | None = None,
 ) -> tuple[dict[str, float], int]:
     """Run one epoch of training or evaluation.
 
@@ -720,6 +722,11 @@ def run_epoch(
         grad_clip: Max gradient norm (0 disables clipping). Training only.
         log_interval: Print a per-step line every this many steps. Training only.
         max_batches: Stop after this many batches. ``None`` means no limit.
+        preempt_check: Optional zero-arg callable invoked after each optimizer
+            step.  The preemption handler sets a flag and passes
+            ``_do_preempt_checkpoint`` here so the checkpoint is saved in the
+            main-thread execution context rather than inside a signal handler,
+            which is unsafe while DataLoader workers are alive.
 
     Returns:
         Tuple of ``(avg_components, n_batches)`` where ``avg_components``
@@ -767,6 +774,8 @@ def run_epoch(
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
+                if preempt_check is not None:
+                    preempt_check()
 
             for k, v in components.items():
                 totals[k] = totals.get(k, 0.0) + v
@@ -1096,14 +1105,32 @@ def main() -> None:
         model = cast(models.MoLeJEPA, torch.compile(model))
 
     # ── preemption handler ────────────────────────────────────────────────────
-    # On the DSI cluster, preemption sends SIGUSR1 with a 5-minute grace period
-    # (configured via --signal=B:USR1@300), then SIGKILL. Exiting with code 99
-    # tells Slurm to requeue the job automatically (--requeue).
+    # On the DSI cluster, preemption sends SIGUSR1 with a 15-minute grace
+    # period (--signal=B:USR1@900), then SIGKILL.  Exiting with code 99 tells
+    # Slurm to requeue the job automatically (--requeue).
+    #
+    # We use a deferred-flag pattern instead of saving directly inside the
+    # signal handler.  Saving from a signal handler while DataLoader workers
+    # are alive is unsafe: torch.save serialises tensors via Python pickling
+    # and can trip over a dead worker's shared-memory segment, producing the
+    # "DataLoader worker exited unexpectedly" error.  The flag is checked at
+    # the top of each epoch and after every batch in run_epoch, so the save
+    # always happens in the main thread's normal execution context with all
+    # workers still alive.
     current_epoch = start_epoch
+    _preempt_requested = False
 
-    def _checkpoint_and_exit(*_: object) -> None:
-        signal.signal(signal.SIGUSR1, signal.SIG_IGN)  # block re-entry during save
-        print(f"\nSIGUSR1 — saving checkpoint at epoch {current_epoch}.", flush=True)
+    def _request_preempt(*_: object) -> None:
+        nonlocal _preempt_requested
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)  # block re-entry
+        print("\nSIGUSR1 received — will checkpoint after current batch.", flush=True)
+        _preempt_requested = True
+
+    def _do_preempt_checkpoint() -> None:
+        print(
+            f"Checkpointing at epoch {current_epoch} then exiting for requeue.",
+            flush=True,
+        )
         try:
             model_io.save_checkpoint(
                 model,
@@ -1123,24 +1150,14 @@ def main() -> None:
                     file=sys.stderr,
                     flush=True,
                 )
-        # Explicitly tear down DataLoader workers before exiting.  If we call
-        # sys.exit() while a _MultiProcessingDataLoaderIter is alive, the
-        # worker processes are orphaned and Python's multiprocessing resource
-        # tracker warns about ~21 leaked semaphores at shutdown.  Nulling the
-        # _iterator attribute triggers the iterator's __del__, which calls
-        # _shutdown_workers() and joins the worker processes cleanly.
         for dl in (loader, val_loader):
             if getattr(dl, "_iterator", None) is not None:
                 dl._iterator = None  # type: ignore[assignment]
-        # Mark the W&B run as preempted so the dashboard shows it as
-        # interrupted rather than crashed.  exit_code=1 (non-zero) signals
-        # that the run didn't complete normally; W&B will keep the run open
-        # so resumption continues it.
         if wandb.run is not None:
             wandb.finish(exit_code=1)
         sys.exit(99)
 
-    signal.signal(signal.SIGUSR1, _checkpoint_and_exit)
+    signal.signal(signal.SIGUSR1, _request_preempt)
 
     # ── stats file ────────────────────────────────────────────────────────────
     # Truncate on a fresh run; on resume, keep history and continue appending.
@@ -1149,6 +1166,9 @@ def main() -> None:
 
     # ── training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.num_epochs):
+        if _preempt_requested:
+            _do_preempt_checkpoint()
+
         current_epoch = epoch
 
         # λ annealing: ramp jepa_lam_* → jepa_lam_*_end linearly over training.
@@ -1170,6 +1190,11 @@ def main() -> None:
         # --max-batches (smoke-test override) takes precedence; otherwise use
         # the value derived from --max-train-samples.
         effective_max_batches = args.max_batches or max_train_batches
+
+        def _preempt_check() -> None:
+            if _preempt_requested:
+                _do_preempt_checkpoint()
+
         train_stats, train_batches = run_epoch(
             model,
             loss_fn,
@@ -1181,6 +1206,7 @@ def main() -> None:
             scheduler=scheduler,
             grad_clip=args.grad_clip,
             max_batches=effective_max_batches,
+            preempt_check=_preempt_check,
         )
 
         val_stats: dict[str, float] | None = None
