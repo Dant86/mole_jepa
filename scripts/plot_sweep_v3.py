@@ -1,8 +1,11 @@
-"""Generate a static Plotly scatter: MSE vs uniformity coloured by i2t R@1.
+"""Generate side-by-side Plotly scatters: MSE vs uniformity, coloured by i2t R@1.
+
+Marker colour encodes i2t R@1 (RdYlGn).  Marker size encodes λ.
+Left panel: spherical uniformity runs.  Right panel: Gaussian SIGReg runs.
 
 Usage:
-    uv run python scripts/plot_sweep_v3.py               # writes sweep_v3_scatter.html
-    uv run python scripts/plot_sweep_v3.py --out my.html
+    uv run python scripts/plot_sweep_v3.py            # writes sweep_v3_scatter.png
+    uv run python scripts/plot_sweep_v3.py --out my.png
 """
 
 import argparse
@@ -11,39 +14,35 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
+from plotly.subplots import make_subplots
 
 _CSV = Path(__file__).parent.parent / "sweep_v3_history.csv"
 
-# Map run names to readable labels
 _LABELS = {
-    "sweep_sphere_lam025_v3": "sphere λ=0.25",
-    "sweep_sphere_lam05_v3": "sphere λ=0.5",
-    "sweep_sphere_lam10_v3": "sphere λ=1.0",
-    "sweep_sphere_lam20_v3": "sphere λ=2.0",
-    "sweep_gauss_lam025_v3": "gauss λ=0.25",
-    "sweep_gauss_lam05_v3": "gauss λ=0.5",
-    "sweep_gauss_lam10_v3": "gauss λ=1.0",
-    "sweep_gauss_lam20_v3": "gauss λ=2.0",
+    "sweep_sphere_lam025_v3": "λ=0.25",
+    "sweep_sphere_lam05_v3": "λ=0.5",
+    "sweep_sphere_lam10_v3": "λ=1.0",
+    "sweep_sphere_lam20_v3": "λ=2.0",
+    "sweep_gauss_lam025_v3": "λ=0.25",
+    "sweep_gauss_lam05_v3": "λ=0.5",
+    "sweep_gauss_lam10_v3": "λ=1.0",
+    "sweep_gauss_lam20_v3": "λ=2.0",
 }
 
-_MARKERS = {
-    "sphere": "circle",
-    "gauss": "diamond",
-}
+# λ → marker diameter (px).  Perceptual area scaling: size ∝ sqrt(λ).
+_LAM_SIZE = {0.25: 8, 0.5: 11, 1.0: 16, 2.0: 22}
 
-_PALETTE = {
-    0.25: "#a8d8ea",
-    0.5: "#4a90d9",
-    1.0: "#2c5f8a",
-    2.0: "#0d2b45",
-}
+_LINE_COLOR = "#555555"  # neutral — colour channel is reserved for R@1
+
+_PANELS = {"sphere": 1, "gauss": 2}
+_PANEL_TITLES = ("Spherical uniformity", "Gaussian SIGReg")
 
 
 def main() -> None:
-    """Parse args and render the scatter plot."""
+    """Parse args and render the side-by-side scatter plot."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", default=str(_CSV))
-    parser.add_argument("--out", default="sweep_v3_scatter.html")
+    parser.add_argument("--out", default="sweep_v3_scatter.png")
     args = parser.parse_args()
 
     df = pd.read_csv(args.csv)
@@ -51,18 +50,33 @@ def main() -> None:
         subset=["epoch/train_loss_mse", "epoch/train_loss_reg_text", "retrieval/i2t_r1"]
     )
 
-    r1_min = df["retrieval/i2t_r1"].min()
-    r1_max = df["retrieval/i2t_r1"].max()
+    r1_min = float(df["retrieval/i2t_r1"].min())
+    r1_max = float(df["retrieval/i2t_r1"].max())
 
-    fig = go.Figure()
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=_PANEL_TITLES,
+        shared_yaxes=False,
+        horizontal_spacing=0.14,
+    )
+
+    # Which run is last in each panel — that one gets the R@1 colorbar.
+    last_in_panel: dict[int, str] = {}
+    for run, _ in df.groupby("run"):
+        run_str = str(run)
+        col = _PANELS["sphere" if "sphere" in run_str else "gauss"]
+        last_in_panel[col] = run_str
 
     for run, group in df.groupby("run"):
         group = group.sort_values("epoch")
         run_str = str(run)
         label = _LABELS.get(run_str, run_str)
         geometry = "sphere" if "sphere" in run_str else "gauss"
+        col = _PANELS[geometry]
         lam = float(group["lam"].iloc[0])
-        line_color = _PALETTE.get(lam, "#888888")
+        marker_size = _LAM_SIZE.get(lam, 12)
+        show_colorbar = run_str == last_in_panel[col]
 
         fig.add_trace(
             go.Scatter(
@@ -70,6 +84,8 @@ def main() -> None:
                 y=group["epoch/train_loss_reg_text"],
                 mode="lines+markers",
                 name=label,
+                legendgroup=label,
+                showlegend=False,  # legend replaced by size-legend dummy traces below
                 text=[
                     f"<b>{label}</b><br>epoch {int(r['epoch'])}<br>"
                     f"MSE={r['epoch/train_loss_mse']:.4f}<br>"
@@ -78,54 +94,100 @@ def main() -> None:
                     for _, r in group.iterrows()
                 ],
                 hoverinfo="text",
-                line=dict(
-                    color=line_color,
-                    width=1.5,
-                    dash="dot" if geometry == "gauss" else "solid",
-                ),
+                line=dict(color=_LINE_COLOR, width=1, dash="dot"),
                 marker=dict(
-                    symbol=_MARKERS[geometry],
-                    size=10,
+                    symbol="circle",
+                    size=marker_size,
                     color=group["retrieval/i2t_r1"].tolist(),
                     colorscale="RdYlGn",
                     cmin=r1_min,
                     cmax=r1_max,
-                    showscale=True if run == list(df["run"].unique())[-1] else False,
+                    showscale=show_colorbar,
                     colorbar=dict(
-                        title="i2t R@1",
+                        title=dict(text="i2t R@1", side="right"),
                         thickness=14,
-                        len=0.6,
+                        len=0.75,
+                        x=1.02,
+                        y=0.5,
                     ),
-                    line=dict(color=line_color, width=1),
+                    line=dict(color="white", width=0.5),
+                ),
+            ),
+            row=1,
+            col=col,
+        )
+
+    # ── size legend: dummy invisible traces, one per λ value ─────────────────
+    for lam, size in sorted(_LAM_SIZE.items()):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                name=f"λ = {lam}",
+                legendgroup=f"lam_{lam}",
+                showlegend=True,
+                marker=dict(
+                    symbol="circle",
+                    size=size,
+                    color="#888888",
+                    line=dict(color="white", width=0.5),
                 ),
             )
         )
 
     fig.update_layout(
         title=dict(
-            text="MoLeJEPA v3 sweep — MSE vs uniformity (colour = i2t R@1)",
-            font=dict(size=15),
+            text=(
+                "MoLeJEPA v3 sweep — MSE vs uniformity"
+                "<br><sup>colour = i2t R@1 · size = λ</sup>"
+            ),
+            font=dict(size=14),
+            x=0.5,
         ),
-        xaxis=dict(title="MSE loss", type="linear", tickformat=".4f"),
-        yaxis=dict(title="Uniformity / reg loss"),
         legend=dict(
-            title="Run",
-            bgcolor="rgba(255,255,255,0.85)",
+            title=dict(text="λ"),
+            bgcolor="rgba(255,255,255,0.9)",
             bordercolor="#cccccc",
             borderwidth=1,
+            x=0.38,
+            y=0.99,
+            xanchor="right",
+            yanchor="top",
         ),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(family="Inter, Arial, sans-serif", size=12),
         hovermode="closest",
-        width=900,
-        height=580,
+        width=1100,
+        height=500,
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#eeeeee", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="#eeeeee", zeroline=False)
+    fig.update_xaxes(
+        title_text="MSE loss",
+        showgrid=True,
+        gridcolor="#eeeeee",
+        zeroline=False,
+        tickformat=".4f",
+    )
+    fig.update_yaxes(
+        title_text="Uniformity / reg loss",
+        showgrid=True,
+        gridcolor="#eeeeee",
+        zeroline=False,
+        col=1,
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="#eeeeee",
+        zeroline=False,
+        col=2,
+    )
 
     out = Path(args.out)
-    pio.write_html(fig, str(out), include_plotlyjs=True, full_html=True)
+    if out.suffix == ".html":
+        pio.write_html(fig, str(out), include_plotlyjs=True, full_html=True)
+    else:
+        pio.write_image(fig, str(out), scale=2)
     print(f"Saved → {out.resolve()}")
 
 

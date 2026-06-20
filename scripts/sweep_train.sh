@@ -58,7 +58,7 @@ PY_PID=""
 on_preempt() {
     echo "[$(date)] USR1 received: checkpointing before preemption."
     if [[ -n "${PY_PID}" ]] && kill -0 "${PY_PID}" 2>/dev/null; then
-        kill -s USR1 -- "-${PY_PID}" 2>/dev/null || kill -USR1 "${PY_PID}" 2>/dev/null || true
+        kill -USR1 "${PY_PID}" 2>/dev/null || true
     fi
     wait "${PY_PID}" || true
     echo "[$(date)] Exiting with code 99 for Slurm requeue."

@@ -24,6 +24,7 @@ dependencies = [
     "jupyterlab",
     "wandb",
     "supabase>=2.0",
+    "kaleido>=1.3.0",
 ]
 
 [dependency-groups]
