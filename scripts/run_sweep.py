@@ -36,6 +36,9 @@ _BASE = dict(
 
 _LAMBDAS = [0.25, 0.5, 1.0, 2.0]
 
+# λ annealing start → end pairs for the critical-λ* search.
+_ANNEAL_LAMBDAS = [(0.0, 4.0), (0.0, 8.0)]
+
 
 def _build_configs(tag: str) -> list[tuple[str, dict]]:
     """Build the sweep config list, with *tag* appended to every name.
@@ -85,6 +88,52 @@ def _build_configs(tag: str) -> list[tuple[str, dict]]:
     return configs
 
 
+def _build_anneal_configs(tag: str) -> list[tuple[str, dict]]:
+    """Build λ-annealing configs that ramp from 0 → lam_end over training.
+
+    Each run traces the full λ curve in one shot, letting you read off λ* from
+    the W&B retrieval curve rather than needing a separate run per λ value.
+    """
+    configs: list[tuple[str, dict]] = []
+    for lam_start, lam_end in _ANNEAL_LAMBDAS:
+        end_tag = str(lam_end).replace(".", "")
+
+        configs.append(
+            (
+                f"sweep_anneal_sphere_lam{end_tag}_{tag}",
+                {
+                    **_BASE,
+                    "jepa_cosine_loss": True,
+                    "jepa_spherical_uniformity": True,
+                    "jepa_lam_image": lam_start,
+                    "jepa_lam_text": lam_start,
+                    "jepa_lam_image_end": lam_end,
+                    "jepa_lam_text_end": lam_end,
+                },
+            )
+        )
+
+        configs.append(
+            (
+                f"sweep_anneal_gauss_lam{end_tag}_{tag}",
+                {
+                    **_BASE,
+                    "jepa_cosine_loss": False,
+                    "jepa_spherical_uniformity": False,
+                    "jepa_lam_image": lam_start,
+                    "jepa_lam_text": lam_start,
+                    "jepa_lam_image_end": lam_end,
+                    "jepa_lam_text_end": lam_end,
+                    "sigreg_n_directions": 1024,
+                    "sigreg_dist": "gaussian",
+                    "sigreg_demean": False,
+                },
+            )
+        )
+
+    return configs
+
+
 def main() -> None:
     """Register configs and print/submit sbatch commands."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -108,16 +157,31 @@ def main() -> None:
         action="store_true",
         help="Overwrite existing registry entries.",
     )
+    parser.add_argument(
+        "--anneal",
+        action="store_true",
+        help=(
+            "Register λ-annealing configs instead of fixed-λ configs. "
+            "Each run ramps λ linearly from 0 → lam_end over all training epochs."
+        ),
+    )
     args = parser.parse_args()
 
-    configs = _build_configs(args.tag)
+    configs = (
+        _build_anneal_configs(args.tag) if args.anneal else _build_configs(args.tag)
+    )
 
     print(f"Registering {len(configs)} sweep configs (tag={args.tag!r}) …\n")
     for name, kwargs in configs:
         cfg = ModelConfig(**kwargs)
         geometry = "sphere" if kwargs.get("jepa_spherical_uniformity") else "gaussian"
         lam = kwargs["jepa_lam_image"]
-        desc = f"Sweep: {geometry}, λ={lam}, embed_dim=256"
+        lam_end = kwargs.get("jepa_lam_image_end")
+        desc = (
+            f"Sweep: {geometry}, λ={lam}→{lam_end}, embed_dim=256"
+            if lam_end is not None
+            else f"Sweep: {geometry}, λ={lam}, embed_dim=256"
+        )
         try:
             registry.register(name, cfg, description=desc, overwrite=args.overwrite)
             print(f"  ✓ {name}")
