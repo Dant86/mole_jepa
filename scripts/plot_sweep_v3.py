@@ -1,5 +1,6 @@
 """Generate side-by-side Plotly scatters: MSE vs uniformity, coloured by i2t R@1.
 
+Marker colour encodes i2t R@1 (RdYlGn).  Marker size encodes λ.
 Left panel: spherical uniformity runs.  Right panel: Gaussian SIGReg runs.
 
 Usage:
@@ -28,12 +29,10 @@ _LABELS = {
     "sweep_gauss_lam20_v3": "λ=2.0",
 }
 
-_PALETTE = {
-    0.25: "#a8d8ea",
-    0.5: "#4a90d9",
-    1.0: "#2c5f8a",
-    2.0: "#0d2b45",
-}
+# λ → marker diameter (px).  Perceptual area scaling: size ∝ sqrt(λ).
+_LAM_SIZE = {0.25: 8, 0.5: 11, 1.0: 16, 2.0: 22}
+
+_LINE_COLOR = "#555555"  # neutral — colour channel is reserved for R@1
 
 _PANELS = {"sphere": 1, "gauss": 2}
 _PANEL_TITLES = ("Spherical uniformity", "Gaussian SIGReg")
@@ -59,10 +58,10 @@ def main() -> None:
         cols=2,
         subplot_titles=_PANEL_TITLES,
         shared_yaxes=False,
-        horizontal_spacing=0.12,
+        horizontal_spacing=0.14,
     )
 
-    # Track which panel gets the colorbar (last trace in each panel)
+    # Which run is last in each panel — that one gets the R@1 colorbar.
     last_in_panel: dict[int, str] = {}
     for run, _ in df.groupby("run"):
         run_str = str(run)
@@ -76,7 +75,7 @@ def main() -> None:
         geometry = "sphere" if "sphere" in run_str else "gauss"
         col = _PANELS[geometry]
         lam = float(group["lam"].iloc[0])
-        line_color = _PALETTE.get(lam, "#888888")
+        marker_size = _LAM_SIZE.get(lam, 12)
         show_colorbar = run_str == last_in_panel[col]
 
         fig.add_trace(
@@ -86,7 +85,7 @@ def main() -> None:
                 mode="lines+markers",
                 name=label,
                 legendgroup=label,
-                showlegend=col == 1,  # deduplicate legend — show only from left panel
+                showlegend=False,  # legend replaced by size-legend dummy traces below
                 text=[
                     f"<b>{label}</b><br>epoch {int(r['epoch'])}<br>"
                     f"MSE={r['epoch/train_loss_mse']:.4f}<br>"
@@ -95,43 +94,65 @@ def main() -> None:
                     for _, r in group.iterrows()
                 ],
                 hoverinfo="text",
-                line=dict(color=line_color, width=1.5),
+                line=dict(color=_LINE_COLOR, width=1, dash="dot"),
                 marker=dict(
                     symbol="circle",
-                    size=10,
+                    size=marker_size,
                     color=group["retrieval/i2t_r1"].tolist(),
                     colorscale="RdYlGn",
                     cmin=r1_min,
                     cmax=r1_max,
                     showscale=show_colorbar,
                     colorbar=dict(
-                        title="i2t R@1",
+                        title=dict(text="i2t R@1", side="right"),
                         thickness=14,
-                        len=0.7,
-                        x=1.02 if col == 2 else 0.44,
+                        len=0.75,
+                        x=1.02,
                         y=0.5,
                     ),
-                    line=dict(color=line_color, width=1),
+                    line=dict(color="white", width=0.5),
                 ),
             ),
             row=1,
             col=col,
         )
 
+    # ── size legend: dummy invisible traces, one per λ value ─────────────────
+    for lam, size in sorted(_LAM_SIZE.items()):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                name=f"λ = {lam}",
+                legendgroup=f"lam_{lam}",
+                showlegend=True,
+                marker=dict(
+                    symbol="circle",
+                    size=size,
+                    color="#888888",
+                    line=dict(color="white", width=0.5),
+                ),
+            )
+        )
+
     fig.update_layout(
         title=dict(
-            text="MoLeJEPA v3 sweep — MSE vs uniformity  (colour = i2t R@1)",
+            text=(
+                "MoLeJEPA v3 sweep — MSE vs uniformity"
+                "<br><sup>colour = i2t R@1 · size = λ</sup>"
+            ),
             font=dict(size=14),
             x=0.5,
         ),
         legend=dict(
-            title="λ",
+            title=dict(text="λ"),
             bgcolor="rgba(255,255,255,0.9)",
             bordercolor="#cccccc",
             borderwidth=1,
-            x=0.01,
+            x=0.38,
             y=0.99,
-            xanchor="left",
+            xanchor="right",
             yanchor="top",
         ),
         plot_bgcolor="white",
