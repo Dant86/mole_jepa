@@ -286,7 +286,14 @@ def _save_checkpoint_to(
     }
 
     tmp = checkpoint_dir / (_CHECKPOINT_FILE + ".tmp")
-    _nfs_op(torch.save, payload, tmp)
+    # Write via a file object so we can fsync before the atomic rename.
+    # Without fsync, NFS can acknowledge the rename before the data pages are
+    # flushed, leaving a valid-looking zip archive with missing tensor data
+    # ("PytorchStreamReader failed locating file data/0").
+    with open(tmp, "wb") as f:
+        torch.save(payload, f)
+        f.flush()
+        os.fsync(f.fileno())
     _nfs_op(os.replace, tmp, current)
 
 

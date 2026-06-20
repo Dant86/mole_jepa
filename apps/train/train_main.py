@@ -1154,7 +1154,12 @@ def main() -> None:
             if getattr(dl, "_iterator", None) is not None:
                 dl._iterator = None  # type: ignore[assignment]
         if wandb.run is not None:
-            wandb.finish(exit_code=1)
+            try:
+                wandb.finish(exit_code=1)
+            except Exception as exc:
+                print(
+                    f"WARNING: wandb.finish failed: {exc}", file=sys.stderr, flush=True
+                )
         sys.exit(99)
 
     signal.signal(signal.SIGUSR1, _request_preempt)
